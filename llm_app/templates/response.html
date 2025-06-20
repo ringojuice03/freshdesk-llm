@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Latest Freshdesk Tickets</title>
+  </head>
+  <body>
+    <h1>Latest 5 Freshdesk Tickets</h1>
+    {% for ticket in tickets %}
+    <div style="border: 1px solid #ccc; margin-bottom: 20px; padding: 10px">
+      <h2>Ticket ID: {{ ticket.id }}</h2>
+      <h3>Conversations:</h3>
+      <ul>
+        {% for conv in ticket.conversations %}
+        <li>
+          <strong>{{ conv.user_id }}:</strong>
+          {{ conv.body_text|linebreaks }}
+        </li>
+        {% empty %}
+        <li>No conversations found.</li>
+
+        {% endfor %}
+      </ul>
+    </div>
+    {% empty %}
+    <p>No tickets found.</p>
+
+    {% endfor %}
+  </body>
+</html>
