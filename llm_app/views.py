@@ -24,63 +24,50 @@ def latest_tickets(request):
     tickets_url = f"https://{domain}.freshdesk.com/api/v2/tickets?order_by=created_at&order_type=desc&per_page=5"
     ticket_response = requests.get(tickets_url, headers=headers, auth=auth)
     tickets = ticket_response.json() if ticket_response.status_code == 200 else []
-    ticket_details = []
-    # for ticket in tickets:
-    #     ticket_id = ticket.get('id')
-    #     conv_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}/conversations"
-    #     conv_response = requests.get(conv_url, headers=headers, auth=auth)
+    ticket_list = []
 
-    #     conversations = conv_response.json() if conv_response.status_code == 200 else []
-    #     print(f"Total conversations: {len(conversations)}")
-    #     for i, conv in enumerate(conversations):
-    #         print(f"Conversation {i+1}: {conv['body_text']}")
+    for ticket in tickets:
+        ticket_id = ticket.get('id')
+        description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
+        ticket_description = requests.get(description_url, headers=headers, auth=auth).json()
 
-        # ticket_details.append({
-        #     'id': ticket_id,
-        #     'conversation': conversations
-        # })
+        requestor_id = ticket_description['requester_id']
+        contact_url = f"https://{domain}.freshdesk.com/api/v2/contacts/{requestor_id}"
+        contact_response = requests.get(contact_url, headers=headers, auth=auth)
+        contact = contact_response.json()
+        contact_name = contact.get('name')
 
-    # 21663
-    # 21704 - missing some
-    # 21706 - missing, pattern: earlier messages than image sent is not loaded
-    # 21700 - pattern: most tickets are missing first message
-    # 21696
-    ticket_id = 21704
-    description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
-    ticket_description = requests.get(description_url, headers=headers, auth=auth).json()
+        print(contact_name)
 
-    print(ticket_description)
-    
-    raw_conversations = get_all_conversations(ticket_id, domain, headers, auth)
-    parsed_conversations = parse_freshdesk_conversations(raw_conversations, ticket_description)
+        raw_conversations = get_all_conversations(ticket_id, domain, headers, auth)
+        parsed_conversations = parse_freshdesk_conversations(raw_conversations, ticket_description)
 
-    is_customer_last_msg = False
-    last_msg = parsed_conversations['ordered_conversation_details'][-1]
-    if last_msg['role'] == 'Customer':
-        is_customer_last_msg = True
-        last_customer_msg = last_msg['body_text']
+        is_customer_last_msg = False
+        last_msg = parsed_conversations['ordered_conversation_details'][-1]
+        if last_msg['role'] == 'Customer':
+            is_customer_last_msg = True
+            last_customer_msg = last_msg['body_text']
 
-    print(f"Total conversations: {len(parsed_conversations['full_conversation'])}")
-    for i, conv in enumerate(parsed_conversations['full_conversation']):
-        print(f"{conv}")
+        print(f"Total conversations: {len(parsed_conversations['full_conversation'])}")
+        for i, conv in enumerate(parsed_conversations['full_conversation']):
+            print(f"{conv}")
 
-    # for i, conv in enumerate(parsed_conversations['customer_conversation']):
-    #     print(f'{i+1}: {conv}')
-
-    ticket_details.append({
+        ticket_list.append({
             'id': ticket_id,
-            'conversation': parsed_conversations['full_conversation']
-    })
+            'name': contact_name,
+            'conversation': parsed_conversations['ordered_conversation_details']
+        })
 
-    translated_conversation = google_translate(parsed_conversations['full_text_conversation'])
-    print(f'Translated conversation:\n{translated_conversation}')
+        translated_conversation = google_translate(parsed_conversations['full_text_conversation'])
+        print(f'Translated conversation:\n{translated_conversation}')
 
-    if is_customer_last_msg:
-        print('Generating response...')
-        generated_response = generate_response(last_customer_msg, translated_conversation)
-        print(f'Response:\n{generated_response}')
+        generated_response = "Only respond when the customer messaged last."
+        if is_customer_last_msg:
+            print('Generating response...')
+            generated_response = generate_response(last_customer_msg, translated_conversation)
+            print(f'Response:\n{generated_response}')
 
-    return render(request, 'response.html', {'tickets': parsed_conversations['ordered_conversation_details']})
+    return render(request, 'response.html', {'tickets': ticket_list, 'generated_response': generated_response})
 
 
 def get_all_conversations(ticket_id, domain, headers, auth):
@@ -102,8 +89,6 @@ def get_all_conversations(ticket_id, domain, headers, auth):
             url = None
     return conversations
 
-
-# def get_first_msg(ticket_id: int, domain: str, headers: dict, auth: tuple) -> :
 
 def parse_freshdesk_conversations(conversations, ticket_description):
     sorted_conversations = sorted(conversations, key=lambda x: x['created_at'])
@@ -169,11 +154,14 @@ def google_translate(conversations) -> str:
     prompt_template = """
 You are an expert linguist and translator specializing in preserving semantic meaning and key terminology. Your task is to translate a given conversation into clear, natural-sounding English.
 
+**Context:** The conversation is relevant to Tindahang Tapat's operations, which is a company of Nueca. Understanding this business context will help ensure accurate translation of company-specific terms, operational procedures, and industry-related vocabulary.
+
 **Key Requirements for Translation:**
 1.  **Semantic Fidelity:** The translated English conversation must accurately convey the original meaning, intent, and nuances of the Bikol, Tagalog, or English (or combination thereof) conversation.
 2.  **Keyword Preservation:** Identify and retain critical keywords, technical terms, proper nouns, and domain-specific vocabulary. If a direct English equivalent for a keyword is not perfectly semantically aligned, prioritize the most common or closest English counterpart while ensuring the original context is maintained.
 3.  **Contextual Accuracy:** Understand the conversational flow and ensure that pronouns, references, and implied meanings are correctly translated based on the full context of the conversation.
 4.  **Natural English:** The output should read as fluent and grammatically correct English, avoiding overly literal translations that sound unnatural.
+5.  **Business Context Awareness:** Consider Tindahang Tapat's business operations and Nueca's corporate context when translating company-specific terminology, processes, and references.
 
 **Important Note for Embedding:** The translated English output will be used for vector embedding (sparse and dense techniques). Therefore, the clarity, accuracy, and presence of key terms in the English translation are paramount for effective information retrieval and semantic search.
 

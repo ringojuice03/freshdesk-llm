@@ -8,18 +8,21 @@
     {% for ticket in tickets %}
     <div style="border: 1px solid #ccc; margin-bottom: 20px; padding: 10px">
       <h2>Ticket ID: {{ ticket.id }}</h2>
+      <h2>Ticket Holder: {{ ticket.name }}</h2>
       <h3>Conversations:</h3>
       <ul>
-        {% for conv in ticket.conversations %}
+        {% for conv in ticket.conversation %}
         <li>
-          <strong>{{ conv.user_id }}:</strong>
-          {{ conv.body_text|linebreaks }}
+          <strong>{{ conv.role }}:</strong>
+          {{ conv.body_text }}
         </li>
         {% empty %}
         <li>No conversations found.</li>
 
         {% endfor %}
       </ul>
+      <h3>Generated Response:</h3>
+      <p>{{ generated_response }}</p>
     </div>
     {% empty %}
     <p>No tickets found.</p>
