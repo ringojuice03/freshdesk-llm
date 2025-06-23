@@ -2,12 +2,30 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 import requests
+import re
 from django.shortcuts import render
 from django.http import HttpResponse
 
 from google import genai
 gemini_api_key = os.environ.get('GEMINI_API_KEY')
 gemini_client = genai.Client(api_key=gemini_api_key)
+
+PRIORITY_MAP = {
+    1: "Low",
+    2: "Medium",
+    3: "High",
+    4: "Urgent"
+}
+
+STATUS_MAP = {
+    2: "Open",
+    3: "Pending",
+    4: "Resolved",
+    5: "Closed",
+    6: "Waiting on Customer",
+    7: "Waiting on Warehouse Confirmation",
+    8: "Follow-up on Warehouse Confirmation",
+}
 
 
 def hello_world(request):
@@ -21,26 +39,46 @@ def latest_tickets(request):
     freshdesk_api_key = os.environ.get('FRESHDESK_API_KEY')
     auth = (freshdesk_api_key, 'X')
     domain = 'nueca'
+    
     tickets_url = f"https://{domain}.freshdesk.com/api/v2/tickets?order_by=created_at&order_type=desc&per_page=5"
     ticket_response = requests.get(tickets_url, headers=headers, auth=auth)
     tickets = ticket_response.json() if ticket_response.status_code == 200 else []
     ticket_list = []
 
-    for ticket in tickets:
-        ticket_id = ticket.get('id')
+    for ticket_id in range(20969, 20975):
+    # for ticket in tickets:
+    #     ticket_id = ticket.get('id')
         description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
         ticket_description = requests.get(description_url, headers=headers, auth=auth).json()
 
         requestor_id = ticket_description['requester_id']
-        contact_url = f"https://{domain}.freshdesk.com/api/v2/contacts/{requestor_id}"
-        contact_response = requests.get(contact_url, headers=headers, auth=auth)
-        contact = contact_response.json()
+        contact = get_contact(requestor_id, domain, headers, auth)
+
         contact_name = contact.get('name')
 
-        print(contact_name)
+        payload = get_payload(ticket_description)
+
+        print(f"Name: {contact_name}")
+        print(f"Priority: {payload['priority']}")
+        print(f"Status: {payload['status']}")
+        print(f"Query type: {payload['query_type']}")
+        print(f"Specific Issue: {payload['specific_issue']}")
 
         raw_conversations = get_all_conversations(ticket_id, domain, headers, auth)
         parsed_conversations = parse_freshdesk_conversations(raw_conversations, ticket_description)
+        full_text_conversation = parsed_conversations['full_text_conversation']
+
+        problem_and_resolution = get_problem_and_resolution(full_text_conversation)
+        problem, resolution = split_problem_and_resolution(problem_and_resolution)
+        payload['problem'] = problem
+        payload['resolution'] = resolution
+
+        print(f"Total conversations: {len(parsed_conversations['full_conversation'])}")
+        for i, conv in enumerate(parsed_conversations['full_conversation']):
+            print(f"{conv}")
+
+        print(f"Problem: {problem}")
+        print(f"Solution: {resolution}")
 
         is_customer_last_msg = False
         last_msg = parsed_conversations['ordered_conversation_details'][-1]
@@ -48,26 +86,115 @@ def latest_tickets(request):
             is_customer_last_msg = True
             last_customer_msg = last_msg['body_text']
 
-        print(f"Total conversations: {len(parsed_conversations['full_conversation'])}")
-        for i, conv in enumerate(parsed_conversations['full_conversation']):
-            print(f"{conv}")
+        # translated_conversation = google_translate(parsed_conversations['full_text_conversation'])
+        # print(f'Translated conversation:\n{translated_conversation}')
+
+        generated_response = "Only respond when the customer messaged last."
+        # if is_customer_last_msg:
+        #     print('Generating response...')
+        #     generated_response = generate_response(last_customer_msg, translated_conversation)
+        #     print(f'Response:\n{generated_response}')
 
         ticket_list.append({
             'id': ticket_id,
             'name': contact_name,
-            'conversation': parsed_conversations['ordered_conversation_details']
+            'conversation': parsed_conversations['ordered_conversation_details'],
+            'generated_response': generated_response,
+            'payload': payload
         })
+        
+        print('----------')
 
-        translated_conversation = google_translate(parsed_conversations['full_text_conversation'])
-        print(f'Translated conversation:\n{translated_conversation}')
+    return render(request, 'response.html', {'tickets': ticket_list,})
 
-        generated_response = "Only respond when the customer messaged last."
-        if is_customer_last_msg:
-            print('Generating response...')
-            generated_response = generate_response(last_customer_msg, translated_conversation)
-            print(f'Response:\n{generated_response}')
 
-    return render(request, 'response.html', {'tickets': ticket_list, 'generated_response': generated_response})
+def get_payload(ticket_description):
+    priority_integer = ticket_description.get('priority')
+    priority = PRIORITY_MAP.get(priority_integer, "Unknown")
+
+    status_integer = ticket_description.get('status')
+    status = STATUS_MAP.get(status_integer, "Unknown")
+
+    query_type = ticket_description.get('type')
+    specific_issue = ticket_description.get('custom_fields')['cf_specific_issues_and_inquiries']
+
+    return {
+        'priority': priority,
+        'status': status,
+        'query_type': query_type,
+        'specific_issue': specific_issue 
+    }
+
+
+def split_problem_and_resolution(text):
+    match = re.search(
+        r"\*\*CORE PROBLEM STATEMENT:\*\*\s*(.*?)\s*\*\*RESOLUTION:\*\*\s*(.*)",
+        text,
+        re.DOTALL
+    )
+    if match:
+        problem = match.group(1).strip()
+        resolution = match.group(2).strip()
+        return problem, resolution
+    else:
+        return None, None
+
+
+def get_problem_and_resolution(full_text_conversation):
+    prompt_template = """
+You are analyzing customer support conversations for Tindahang Tapat, a digital platform that enables sari-sari stores to order groceries via mobile phone.
+
+## TASK
+Extract and structure the key information from the conversation below for storage in a vector database used by a RAG system.
+
+## INSTRUCTIONS
+1. **Problem Statement**: Identify the customer's core issue in 2-3 clear, concise sentences
+   - Focus on the functional problem, not emotional expressions
+   - Use generic product categories instead of specific brand names
+   - Remove customer-specific details (names, phone numbers, order IDs)
+   - Prioritize searchable, reusable problem patterns
+
+2. **Resolution**: Summarize the final solution provided in 2-3 sentences
+   - Include specific steps taken by the agent
+   - Mention any preventive measures or follow-up actions
+   - If unresolved, state "UNRESOLVED" and note next steps
+
+3. **Cleanup Requirements**:
+   - Remove: timestamps, agent names, email signatures, greetings, pleasantries, repetitions
+   - Normalize: technical terms, feature names
+   - **Generalize products**: Replace specific brand names with generic categories (e.g., "Nescafe stick" → "instant coffee product", "Tide detergent" → "laundry detergent")
+   - Generalize: customer-specific details to make the problem statement reusable
+
+4. **Format**: Use clear, professional language suitable for knowledge base search
+
+---
+
+**CONVERSATION:**
+{conversation}
+
+---
+
+**CORE PROBLEM STATEMENT:**
+[Customer's main issue in standardized, searchable format]
+
+**RESOLUTION:**
+[Final solution provided or current status if unresolved]
+"""
+    prompt = prompt_template.format(conversation=full_text_conversation)
+    response = gemini_client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=prompt
+        )
+    
+    return response.candidates[0].content.parts[0].text
+
+
+def get_contact(requestor_id, domain, headers, auth):
+    contact_url = f"https://{domain}.freshdesk.com/api/v2/contacts/{requestor_id}"
+    contact_response = requests.get(contact_url, headers=headers, auth=auth)
+    contact = contact_response.json()
+
+    return contact
 
 
 def get_all_conversations(ticket_id, domain, headers, auth):
@@ -87,6 +214,7 @@ def get_all_conversations(ticket_id, domain, headers, auth):
             print("has pagination")
         else:
             url = None
+
     return conversations
 
 
@@ -194,7 +322,7 @@ It is crucial that your tone is **warm, empathetic, and reassuring**, acknowledg
 **Customer's Specific Concern/Last Message:**
 {last_customer_msg}
 
-**Your Detailed, Empathetic, and Thorough Response (as a Customer Service Representative):**
+**Make it 3 sentences long at maximum. Your Detailed, Empathetic, and Thorough Response (as a Customer Service Representative):**
 """
 
     prompt = prompt_template.format(translated_conversation=translated_conversation, last_customer_msg=last_customer_msg)

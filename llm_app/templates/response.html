@@ -9,6 +9,20 @@
     <div style="border: 1px solid #ccc; margin-bottom: 20px; padding: 10px">
       <h2>Ticket ID: {{ ticket.id }}</h2>
       <h2>Ticket Holder: {{ ticket.name }}</h2>
+      {% if ticket.payload %}
+      <ul>
+        <li><strong>Priority:</strong> {{ ticket.payload.priority }}</li>
+        <li><strong>Status:</strong> {{ ticket.payload.status }}</li>
+        <li><strong>Query Type:</strong> {{ ticket.payload.query_type }}</li>
+        <li>
+          <strong>Specific Issue:</strong> {{ ticket.payload.specific_issue }}
+        </li>
+        {% comment %}
+        <li><strong>Problem:</strong> {{ ticket.payload.problem }}</li>
+        <li><strong>Resolution:</strong> {{ ticket.payload.resolution }}</li>
+        {% endcomment %}
+      </ul>
+      {% endif %}
       <h3>Conversations:</h3>
       <ul>
         {% for conv in ticket.conversation %}
@@ -22,7 +36,7 @@
         {% endfor %}
       </ul>
       <h3>Generated Response:</h3>
-      <p>{{ generated_response }}</p>
+      <p>{{ ticket.generated_response }}</p>
     </div>
     {% empty %}
     <p>No tickets found.</p>
