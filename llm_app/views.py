@@ -5,10 +5,24 @@ import requests
 import re
 from django.shortcuts import render
 from django.http import HttpResponse
+import json
+
+from groq import Groq
+groq_api_key = os.environ.get('GROQ_API_KEY')
+groq_client = Groq(api_key=groq_api_key)
 
 from google import genai
 gemini_api_key = os.environ.get('GEMINI_API_KEY')
 gemini_client = genai.Client(api_key=gemini_api_key)
+
+from qdrant_client import models, QdrantClient
+
+headers = {
+    'Content-Type': 'application/json'
+}
+freshdesk_api_key = os.environ.get('FRESHDESK_API_KEY')
+auth = (freshdesk_api_key, 'X')
+domain = 'nueca'
 
 PRIORITY_MAP = {
     1: "Low",
@@ -32,14 +46,116 @@ def hello_world(request):
     return render(request, 'hello.html')
 
 
+def embed_tickets(request):
+    tickets_payload = []
+    with open("documents.json", "r", encoding="utf-8") as f:
+        tickets_payload = json.load(f)
+
+    print('Initializing qdrant client')
+    qd_client = QdrantClient('http://localhost:6333')
+
+    collection_name = 'freshdesk-tickets-rag'
+
+    qd_client.delete_collection(collection_name=collection_name)
+
+    qd_client.create_collection(
+        collection_name=collection_name,
+        vectors_config={
+            "jina-small": models.VectorParams(
+                size = 512,
+                distance = models.Distance.COSINE
+            )
+        },
+        sparse_vectors_config={
+            "bm25": models.SparseVectorParams(
+                modifier = models.Modifier.IDF
+            )
+        },
+    )
+
+    print('Uploading data points...')
+    qd_client.upsert(
+        collection_name=collection_name,
+        points=[
+            models.PointStruct(
+                id=ticket['id'],
+                vector={
+                    "jina-small": models.Document(
+                        text=str(ticket['problem']),
+                        model="jinaai/jina-embeddings-v2-small-en"
+                    ),
+                    "bm25": models.Document(
+                        text=str(ticket['problem']),
+                        model="Qdrant/bm25"
+                    )
+                },
+                payload=ticket
+            )
+
+            for ticket in tickets_payload
+        ]
+    )
+
+    print('Creating payload index...')
+    qd_client.create_payload_index(
+        collection_name=collection_name,
+        field_name="priority",
+        field_schema="keyword"
+    )
+
+    qd_client.create_payload_index(
+        collection_name=collection_name,
+        field_name="status",
+        field_schema="keyword"
+    )
+
+    qd_client.create_payload_index(
+        collection_name=collection_name,
+        field_name="query_type",
+        field_schema="keyword"
+    )
+
+    qd_client.create_payload_index(
+        collection_name=collection_name,
+        field_name="specific_issue",
+        field_schema="keyword"
+    )
+
+    print('Done')    
+    return render(request, 'embed.html')
+
+def get_payload_to_json(request):
+    tickets_payload = []
+
+    print('Fetching tickets')
+    # 21901
+    for ticket_id in range(21400, 21501):
+        print(ticket_id)
+        description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
+        ticket_description = requests.get(description_url, headers=headers, auth=auth).json()
+
+        payload = get_payload(ticket_description)
+
+        if payload['status'] == 2: continue
+
+        raw_conversations = get_all_conversations(ticket_id, domain, headers, auth)
+        parsed_conversations = parse_freshdesk_conversations(raw_conversations, ticket_description)
+        full_text_conversation = parsed_conversations['full_text_conversation']
+
+        problem_and_resolution = get_problem_and_resolution(full_text_conversation)
+        problem, resolution = split_problem_and_resolution(problem_and_resolution)
+        payload['problem'] = problem
+        payload['resolution'] = resolution
+
+        tickets_payload.append(payload)
+
+    with open("documents.json", "w", encoding="utf-8") as f:
+        json.dump(tickets_payload, f, ensure_ascii=False, indent=4)
+
+    return render(request, 'json.html')
+
+
 def latest_tickets(request):
-    headers = {
-        'Content-Type': 'application/json'
-    }
-    freshdesk_api_key = os.environ.get('FRESHDESK_API_KEY')
-    auth = (freshdesk_api_key, 'X')
-    domain = 'nueca'
-    
     tickets_url = f"https://{domain}.freshdesk.com/api/v2/tickets?order_by=created_at&order_type=desc&per_page=5"
     ticket_response = requests.get(tickets_url, headers=headers, auth=auth)
     tickets = ticket_response.json() if ticket_response.status_code == 200 else []
@@ -59,10 +175,10 @@ def latest_tickets(request):
         payload = get_payload(ticket_description)
 
         print(f"Name: {contact_name}")
-        print(f"Priority: {payload['priority']}")
-        print(f"Status: {payload['status']}")
-        print(f"Query type: {payload['query_type']}")
-        print(f"Specific Issue: {payload['specific_issue']}")
+        # print(f"Priority: {payload['priority']}")
+        # print(f"Status: {payload['status']}")
+        # print(f"Query type: {payload['query_type']}")
+        # print(f"Specific Issue: {payload['specific_issue']}")
 
         raw_conversations = get_all_conversations(ticket_id, domain, headers, auth)
         parsed_conversations = parse_freshdesk_conversations(raw_conversations, ticket_description)
@@ -73,12 +189,12 @@ def latest_tickets(request):
         payload['problem'] = problem
         payload['resolution'] = resolution
 
-        print(f"Total conversations: {len(parsed_conversations['full_conversation'])}")
-        for i, conv in enumerate(parsed_conversations['full_conversation']):
-            print(f"{conv}")
+        # print(f"Total conversations: {len(parsed_conversations['full_conversation'])}")
+        # for i, conv in enumerate(parsed_conversations['full_conversation']):
+        #     print(f"{conv}")
 
-        print(f"Problem: {problem}")
-        print(f"Solution: {resolution}")
+        # print(f"Problem: {problem}")
+        # print(f"Solution: {resolution}")
 
         is_customer_last_msg = False
         last_msg = parsed_conversations['ordered_conversation_details'][-1]
@@ -119,6 +235,7 @@ def get_payload(ticket_description):
     specific_issue = ticket_description.get('custom_fields')['cf_specific_issues_and_inquiries']
 
     return {
+        'id': ticket_description['id'],
         'priority': priority,
         'status': status,
         'query_type': query_type,
@@ -174,6 +291,9 @@ Extract and structure the key information from the conversation below for storag
 
 ---
 
+Output CORE [CORE PROBLEM STATEMENT] and [RESOLUTION] ONLY.
+If there is no problem and resolution, output No Problem and No Resolution respectively.
+
 **CORE PROBLEM STATEMENT:**
 [Customer's main issue in standardized, searchable format]
 
@@ -181,12 +301,33 @@ Extract and structure the key information from the conversation below for storag
 [Final solution provided or current status if unresolved]
 """
     prompt = prompt_template.format(conversation=full_text_conversation)
-    response = gemini_client.models.generate_content(
-            model='gemini-2.0-flash',
-            contents=prompt
-        )
+
+    # response = gemini_client.models.generate_content(
+    #         model='gemini-2.0-flash',
+    #         contents=prompt
+    #     )
+    # answer = response.candidates[0].content.parts[0].text
     
-    return response.candidates[0].content.parts[0].text
+    response = groq_client.chat.completions.create(
+        model="meta-llama/llama-4-scout-17b-16e-instruct",
+        messages=[
+        {
+            "role": "user",
+            "content": prompt,
+        }
+        ],
+        temperature=1,
+        max_completion_tokens=1024,
+        top_p=1,
+        stream=True,
+        stop=None,
+    )
+    answer = ""
+    for chunk in response:
+        content = chunk.choices[0].delta.content or ""
+        answer += content
+
+    return answer
 
 
 def get_contact(requestor_id, domain, headers, auth):

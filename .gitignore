@@ -9,3 +9,6 @@ db.sqlite3
 /media/
 /static/
 *.log
+
+cmd.txt
+documents.json
