@@ -1,1 +1,1 @@
-{"schema":{"query_type":"keyword","specific_issue":"keyword","status":"keyword","priority":"keyword"}}
+{"schema":{"priority":"keyword","status":"keyword","query_type":"keyword","specific_issue":"keyword"}}
