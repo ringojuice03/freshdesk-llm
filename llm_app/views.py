@@ -8,7 +8,8 @@ from django.http import HttpResponse
 import json
 
 from groq import Groq
-groq_api_key = os.environ.get('GROQ_API_KEY')
+# groq_api_key = os.environ.get('GROQ_API_KEY')
+groq_api_key = "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"
 groq_client = Groq(api_key=groq_api_key)
 
 from google import genai
@@ -19,16 +20,20 @@ from qdrant_client import models, QdrantClient
 qd_client = QdrantClient('http://localhost:6333')
 collection_name = 'freshdesk-tickets-rag'
 
-with open('fields.json', "r", encoding="utf-8") as f:
-    fields = json.load(f)
-qt_choices = fields['query_type_choices']
-si_choices = fields['specific_issue_choices']
-query_type_choices = ""
-for choice in qt_choices:
-    query_type_choices = query_type_choices + choice + "\n"
-specific_issue_choices = ""
-for choice in si_choices:
-    specific_issue_choices = specific_issue_choices + choice + "\n"
+def extract_query_and_issue_types():
+    with open('fields.json', "r", encoding="utf-8") as f:
+        fields = json.load(f)
+    qt_choices = fields['query_type_choices']
+    si_choices = fields['specific_issue_choices']
+    query_type_choices = ""
+    for choice in qt_choices:
+        query_type_choices = query_type_choices + choice + "\n"
+    specific_issue_choices = ""
+    for choice in si_choices:
+        specific_issue_choices = specific_issue_choices + choice + "\n"
+    return query_type_choices,specific_issue_choices
+
+query_type_choices, specific_issue_choices = extract_query_and_issue_types()
 
 headers = {
     'Content-Type': 'application/json'
@@ -54,118 +59,8 @@ STATUS_MAP = {
     8: "Follow-up on Warehouse Confirmation",
 }
 
-
 def hello_world(request):
-    print(query_type_choices)
-    print('-----')
-    print(specific_issue_choices)
-    return render(request, 'hello.html')
-
-
-def embed_tickets(request):
-    tickets_payload = []
-    with open("documents.json", "r", encoding="utf-8") as f:
-        tickets_payload = json.load(f)
-
-    print('Initializing qdrant client')
-    
-    qd_client.create_collection(
-        collection_name=collection_name,
-        vectors_config={
-            "jina-small": models.VectorParams(
-                size = 512,
-                distance = models.Distance.COSINE
-            )
-        },
-        sparse_vectors_config={
-            "bm25": models.SparseVectorParams(
-                modifier = models.Modifier.IDF
-            )
-        },
-    )
-
-    print('Uploading data points...')
-    qd_client.upsert(
-        collection_name=collection_name,
-        points=[
-            models.PointStruct(
-                id=ticket['id'],
-                vector={
-                    "jina-small": models.Document(
-                        text=str(ticket['problem']),
-                        model="jinaai/jina-embeddings-v2-small-en"
-                    ),
-                    "bm25": models.Document(
-                        text=str(ticket['problem']),
-                        model="Qdrant/bm25"
-                    )
-                },
-                payload=ticket
-            )
-
-            for ticket in tickets_payload
-        ]
-    )
-
-    print('Creating payload index...')
-    qd_client.create_payload_index(
-        collection_name=collection_name,
-        field_name="priority",
-        field_schema="keyword"
-    )
-
-    qd_client.create_payload_index(
-        collection_name=collection_name,
-        field_name="status",
-        field_schema="keyword"
-    )
-
-    qd_client.create_payload_index(
-        collection_name=collection_name,
-        field_name="query_type",
-        field_schema="keyword"
-    )
-
-    qd_client.create_payload_index(
-        collection_name=collection_name,
-        field_name="specific_issue",
-        field_schema="keyword"
-    )
-
-    print('Done')    
-    return render(request, 'embed.html')
-
-def get_payload_to_json(request):
-    tickets_payload = []
-
-    print('Fetching tickets')
-    for ticket_id in range(0, 101):
-        print(ticket_id)
-        description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
-        response = requests.get(description_url, headers=headers, auth=auth)
-    
-        if response.status_code == 200:
-            ticket_description = response.json()
-        else:
-            print(f"Ticket ID {ticket_id} not found (Status: {response.status_code}). Skipping...")
-            continue
-
-        payload = get_payload(ticket_description)
-
-        if payload['status'] == 2: continue
-        if payload['query_type'] == None: continue 
-        if payload['specific_issue'] == None: continue
-
-        raw_conversations = get_all_conversations(ticket_id, domain, headers, auth)
-        parsed_conversations = parse_freshdesk_conversations(raw_conversations, ticket_description)
-        full_text_conversation = parsed_conversations['full_text_conversation']
-
-        problem_and_resolution = get_problem_and_resolution(full_text_conversation)
-        problem, resolution = split_problem_and_resolution(problem_and_resolution)
-        payload['problem'] = problem
-        payload['resolution'] = resolution
-
-        tickets_payload.append(payload) 
+    fixed_tickets = []
 
     file_path = "documents.json"
     if os.path.exists(file_path):
@@ -174,13 +69,39 @@ def get_payload_to_json(request):
     else:
         data = []
 
-    data.extend(tickets_payload)
+    for doc in data:
+        if doc['problem'] == None or doc['resolution'] == None:
+            print(doc['id'])
+            description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{doc['id']}"
+            response = requests.get(description_url, headers=headers, auth=auth)
+        
+            if response.status_code == 200:
+                ticket_description = response.json()
+            else:
+                print(f"Ticket ID {doc['id']} not found (Status: {response.status_code}). Skipping...")
+                continue
 
+            doc = get_payload(ticket_description)
+
+            raw_conversations = get_all_conversations(doc['id'], domain, headers, auth)
+            parsed_conversations = parse_freshdesk_conversations(raw_conversations, ticket_description)
+            full_text_conversation = parsed_conversations['full_text_conversation']
+
+            problem_and_resolution = get_problem_and_resolution(full_text_conversation)
+            problem, resolution = split_problem_and_resolution(problem_and_resolution)
+            doc['problem'] = problem
+            doc['resolution'] = resolution
+
+            print(problem_and_resolution)
+            print('-----')
+
+        fixed_tickets.append(doc)
+    
     with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+        json.dump(fixed_tickets, f, ensure_ascii=False, indent=4)
 
-    return render(request, 'json.html')
-
+    print('Tickets okay')
+    return render(request, 'hello.html')
 
 def latest_tickets(request):
     tickets_url = f"https://{domain}.freshdesk.com/api/v2/tickets?order_by=created_at&order_type=desc&per_page=5"
@@ -242,14 +163,12 @@ def latest_tickets(request):
 
     return render(request, 'response.html', {'tickets': ticket_list,})
 
-
 def rag_classification(problem: str) -> str:
     search_response = rrf_search(problem)
     prompt = classification_prompt(problem, search_response)
     response = llm_response(prompt)
 
     return response
-
 
 def rag(problem: str, query_type: str) -> str:
     search_response = rrf_filter_search(problem, query_type)
@@ -260,7 +179,6 @@ def rag(problem: str, query_type: str) -> str:
 
     return answer, priority
 
-
 def rrf_search(problem: str, limit: int = 5) -> str:
     search_results = qd_client.query_points(
         collection_name=collection_name,
@@ -268,9 +186,9 @@ def rrf_search(problem: str, limit: int = 5) -> str:
             models.Prefetch(
                 query=models.Document(
                     text=problem,
-                    model="jinaai/jina-embeddings-v2-small-en"
+                    model="BAAI/bge-large-en-v1.5"
                 ),
-                using="jina-small",
+                using="baai-large",
                 limit=5*limit,
             ),
             models.Prefetch(
@@ -310,9 +228,9 @@ def rrf_filter_search(problem: str, query_type: str, limit: int = 5) -> str:
                 ),
                 query=models.Document(
                     text=problem,
-                    model="jinaai/jina-embeddings-v2-small-en"
+                    model="BAAI/bge-large-en-v1.5"
                 ),
-                using="jina-small",
+                using="baai-large",
                 limit=5*limit,
             ),
             models.Prefetch(
@@ -482,7 +400,7 @@ def llm_response(prompt: str) -> str:
             "content": prompt,
         }
         ],
-        temperature=1,
+        temperature=0.4, # for more determinisitc output, default 1
         max_completion_tokens=1024,
         top_p=1,
         stream=True,
@@ -496,6 +414,78 @@ def llm_response(prompt: str) -> str:
 
     return answer
 
+def embed_tickets(request):
+    tickets_payload = []
+    with open("documents.json", "r", encoding="utf-8") as f:
+        tickets_payload = json.load(f)
+
+    print('Initializing qdrant client')
+    
+    # qd_client.create_collection(
+    #     collection_name=collection_name,
+    #     vectors_config={
+    #         "baai-large": models.VectorParams(
+    #             size = 1024,
+    #             distance = models.Distance.COSINE
+    #         )
+    #     },
+    #     sparse_vectors_config={
+    #         "bm25": models.SparseVectorParams(
+    #             modifier = models.Modifier.IDF
+    #         )
+    #     },
+    # )
+
+    print('Uploading data points...')
+    qd_client.upsert(
+        collection_name=collection_name,
+        points=[
+            models.PointStruct(
+                id=ticket['id'],
+                vector={
+                    "baai-large": models.Document(
+                        text=str(ticket['problem']),
+                        model="BAAI/bge-large-en-v1.5"
+                    ),
+                    "bm25": models.Document(
+                        text=str(ticket['problem']),
+                        model="Qdrant/bm25"
+                    )
+                },
+                payload=ticket
+            )
+
+            for ticket in tickets_payload
+        ]
+    )
+
+    print('Indexing payload...')
+    qd_client.create_payload_index(
+        collection_name=collection_name,
+        field_name="priority",
+        field_schema="keyword"
+    )
+
+    qd_client.create_payload_index(
+        collection_name=collection_name,
+        field_name="status",
+        field_schema="keyword"
+    )
+
+    qd_client.create_payload_index(
+        collection_name=collection_name,
+        field_name="query_type",
+        field_schema="keyword"
+    )
+
+    qd_client.create_payload_index(
+        collection_name=collection_name,
+        field_name="specific_issue",
+        field_schema="keyword"
+    )
+
+    print('Done')    
+    return render(request, 'embed.html')
 
 def get_payload(ticket_description):
     priority_integer = ticket_description.get('priority')
@@ -515,23 +505,71 @@ def get_payload(ticket_description):
         'specific_issue': specific_issue 
     }
 
+def get_payload_to_json(request):
+    tickets_payload = []
+
+    print('Fetching tickets')
+    for ticket_id in range(201, 501):
+        print(ticket_id)
+        description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
+        response = requests.get(description_url, headers=headers, auth=auth)
+    
+        if response.status_code == 200:
+            ticket_description = response.json()
+        else:
+            print(f"Ticket ID {ticket_id} not found (Status: {response.status_code}). Skipping...")
+            continue
+
+        payload = get_payload(ticket_description)
+
+        if payload['status'] == 2: continue
+        if payload['query_type'] == None: continue 
+        if payload['specific_issue'] == None: continue
+
+        raw_conversations = get_all_conversations(ticket_id, domain, headers, auth)
+        parsed_conversations = parse_freshdesk_conversations(raw_conversations, ticket_description)
+        full_text_conversation = parsed_conversations['full_text_conversation']
+
+        problem_and_resolution = get_problem_and_resolution(full_text_conversation)
+        problem, resolution = split_problem_and_resolution(problem_and_resolution)
+        payload['problem'] = problem
+        payload['resolution'] = resolution
+
+        print(problem_and_resolution)
+        print('-----')
+
+        tickets_payload.append(payload) 
+
+        file_path = "documents.json"
+        if os.path.exists(file_path):
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            data = []
+
+        # data.extend(tickets_payload)
+        data.append(payload)
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+
+    return render(request, 'json.html')
 
 def split_problem_and_resolution(text):
     pattern = r"""
-        [#\*\s]*CORE\s+PROBLEM\s+STATEMENT[:\s]*[#\*\s]*
+        [#\*\s]*CORE\s+PROBLEM\s+STATEMENT[:\s\#\*]*
         (.*?)                                  
-        [#\*\s]*RESOLUTION[:\s]*[#\*\s]*        
+        [#\*\s]*RESOLUTION[:\s\#\*]*    
         (.*)                          
     """
 
-    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE | re.VERBOSE)
+    match = re.search(pattern, text, re.DOTALL | re.VERBOSE)
     if match:
         problem = match.group(1).strip()
         resolution = match.group(2).strip()
         return problem, resolution
     else:
         return None, None
-
 
 def split_query_and_issue_type(text: str):
     pattern = r"""
@@ -549,7 +587,6 @@ def split_query_and_issue_type(text: str):
     else:
         return None, None
 
-
 def split_answer_and_priority(text: str):
     pattern = r"""
         [#\*\s]*ANSWER[:\s\*\#]*
@@ -558,79 +595,13 @@ def split_answer_and_priority(text: str):
         (.*)              
     """
 
-    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE | re.VERBOSE)
+    match = re.search(pattern, text, re.DOTALL | re.VERBOSE)
     if match:
         answer = match.group(1).strip()
         priority = match.group(2).strip()
         return answer, priority
     else:
         return None, None
-
-
-def get_problem_and_resolution(full_text_conversation):
-    prompt_template = """
-## CONTEXT
-You are analyzing customer support conversations for Tindahang Tapat, a digital platform enabling sari-sari stores to order groceries via mobile phone. Your task is to extract standardized problem-resolution pairs for a RAG knowledge base.
-
-## ANALYSIS REQUIREMENTS
-
-### Problem Statement Extraction
-Create a **searchable, generic problem description** that:
-- **Focuses on function over emotion**: Describe what failed/broke, not how customers felt
-- **Uses standard terminology**: Platform features, order processes, payment methods, product categories
-- **Removes specificity**: No customer names, order numbers, specific brands, or timestamps
-- **Enables similarity matching**: Use consistent vocabulary for similar issues
-- **Length**: 2-3 sentences maximum
-
-### Resolution Documentation  
-Provide an **actionable solution summary** that:
-- **Details specific steps**: What the agent did to resolve the issue
-- **Includes verification**: How resolution was confirmed
-- **Notes preventive measures**: Steps to avoid recurrence
-- **States clear outcome**: "RESOLVED" with method, or "UNRESOLVED" with next steps
-- **Length**: 2-3 sentences maximum
-
-## STANDARDIZATION RULES
-
-### Content Normalization
-- **Products**: "Nescafe 3-in-1" → "instant coffee product"
-- **Customers**: "Mrs. Santos from Quezon City" → "store owner"  
-- **Orders**: "Order #TT2024001" → "customer order"
-- **Amounts**: "₱1,250.00" → "order amount"
-- **Dates/Times**: Remove all temporal references unless process-critical
-
-### Language Standardization
-- **Payment issues**: "payment processing", "transaction failure", "payment method"
-- **Delivery problems**: "delivery scheduling", "logistics coordination", "fulfillment"
-- **Product concerns**: "product availability", "inventory discrepancy", "catalog issue"
-- **Account access**: "login authentication", "account verification", "profile management"
-- **App functionality**: "mobile app", "platform feature", "system functionality"
-
-### Excluded Content
-Remove entirely:
-- Greetings, sign-offs, pleasantries
-- Agent names, department references  
-- Conversation metadata (timestamps, channel info)
-- Emotional expressions and subjective language
-- Repetitive confirmations or status updates
-
-## CONVERSATION DATA
-{conversation}
-
-## OUTPUT REQUIREMENTS
-Provide ONLY the structured output below. No explanations, commentary, or additional text.
-
-**CORE PROBLEM STATEMENT:**
-[Generic, searchable problem description optimized for vector similarity and keyword matching]
-
-**RESOLUTION:**
-[Actionable solution steps and final status: RESOLVED or UNRESOLVED with next steps]
-"""
-    prompt = prompt_template.format(conversation=full_text_conversation)
-    answer = llm_response(prompt)
-
-    return answer
-
 
 def get_problem(full_text_conversation):
     prompt_template = """
@@ -712,6 +683,69 @@ Extract and output ONLY the standardized problem statement. Follow these rules:
 
     return answer
 
+def get_problem_and_resolution(full_text_conversation):
+    prompt_template = """
+## CONTEXT
+You are analyzing customer support conversations for Tindahang Tapat, a digital platform enabling sari-sari stores to order groceries via mobile phone. Your task is to extract standardized problem-resolution pairs for a RAG knowledge base.
+
+## ANALYSIS REQUIREMENTS
+
+### Problem Statement Extraction
+Create a **searchable, generic problem description** that:
+- **Focuses on function over emotion**: Describe what failed/broke, not how customers felt
+- **Uses standard terminology**: Platform features, order processes, payment methods, product categories
+- **Removes specificity**: No customer names, order numbers, specific brands, or timestamps
+- **Enables similarity matching**: Use consistent vocabulary for similar issues
+- **Length**: It should be 2-3 sentences.
+
+### Resolution Documentation  
+Provide an **actionable solution summary** that:
+- **Details specific steps**: What the agent did to resolve the issue
+- **Includes verification**: How resolution was confirmed
+- **Notes preventive measures**: Steps to avoid recurrence
+- **States clear outcome**: "RESOLVED" with method, or "UNRESOLVED" with next steps
+- **Length**: It should be 2-3 sentences.
+
+## STANDARDIZATION RULES
+
+### Content Normalization
+- **Products**: "Nescafe 3-in-1" → "instant coffee product"
+- **Customers**: "Mrs. Santos from Quezon City" → "store owner"  
+- **Orders**: "Order #TT2024001" → "customer order"
+- **Amounts**: "₱1,250.00" → "order amount"
+- **Dates/Times**: Remove all temporal references unless process-critical
+
+### Language Standardization
+- **Payment issues**: "payment processing", "transaction failure", "payment method"
+- **Delivery problems**: "delivery scheduling", "logistics coordination", "fulfillment"
+- **Product concerns**: "product availability", "inventory discrepancy", "catalog issue"
+- **Account access**: "login authentication", "account verification", "profile management"
+- **App functionality**: "mobile app", "platform feature", "system functionality"
+
+### Excluded Content
+Remove entirely:
+- Greetings, sign-offs, pleasantries
+- Agent names, department references  
+- Conversation metadata (timestamps, channel info)
+- Emotional expressions and subjective language
+- Repetitive confirmations or status updates
+
+## CONVERSATION DATA
+{conversation}
+
+## OUTPUT REQUIREMENTS
+Provide ONLY the CORE PROBLEM STATEMENT and RESOLUTION below. No explanations, commentary, or additional text.
+
+CORE PROBLEM STATEMENT:
+[Generic, searchable problem description optimized for vector similarity and keyword matching]
+
+RESOLUTION:
+[Actionable solution steps and final status: RESOLVED or UNRESOLVED with next steps]
+"""
+    prompt = prompt_template.format(conversation=full_text_conversation)
+    answer = llm_response(prompt)
+
+    return answer
 
 def get_contact(requestor_id, domain, headers, auth):
     contact_url = f"https://{domain}.freshdesk.com/api/v2/contacts/{requestor_id}"
@@ -719,7 +753,6 @@ def get_contact(requestor_id, domain, headers, auth):
     contact = contact_response.json()
 
     return contact
-
 
 def get_all_conversations(ticket_id, domain, headers, auth):
     conversations = []
@@ -740,7 +773,6 @@ def get_all_conversations(ticket_id, domain, headers, auth):
             url = None
 
     return conversations
-
 
 def parse_freshdesk_conversations(conversations, ticket_description):
     sorted_conversations = sorted(conversations, key=lambda x: x['created_at'])

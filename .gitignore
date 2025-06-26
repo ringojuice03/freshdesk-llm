@@ -12,7 +12,6 @@ db.sqlite3
 
 cmd.txt
 documents.json
-documents copy.json
 a.json
 fields.json
 qdrant_storage/
