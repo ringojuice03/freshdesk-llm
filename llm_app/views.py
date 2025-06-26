@@ -301,17 +301,17 @@ Classify the customer's problem into the appropriate query type and specific iss
 ```
 
 ## OUTPUT REQUIREMENTS
-- Provide **only** the classifications below
-- No additional text, explanations, or formatting
+- Provide **ONLY** the classifications below
+- STRICTLY no additional text, explanations, or formatting
 - Use **NONE** if no suitable category exists
 
 ## OUTPUT FORMAT
 
 QUERY TYPE:
-[Selected category or NONE]
+[Selected category from available query types or NONE]
 
 SPECIFIC ISSUE TYPE:
-[Selected category or NONE]
+[Selected category from available query types or NONE]
 """
     prompt = prompt_template.format(query_type_choices=query_type_choices, 
                                     specific_issue_choices=specific_issue_choices,
@@ -385,7 +385,7 @@ PRIORITY
     
     return prompt
 
-def llm_response(prompt: str) -> str:
+def llm_response(prompt: str, temperature: int = 1) -> str:
     # response = gemini_client.models.generate_content(
     #         model='gemini-2.0-flash',
     #         contents=prompt
@@ -400,7 +400,7 @@ def llm_response(prompt: str) -> str:
             "content": prompt,
         }
         ],
-        temperature=0.4, # for more determinisitc output, default 1
+        temperature=temperature,
         max_completion_tokens=1024,
         top_p=1,
         stream=True,
@@ -605,6 +605,7 @@ def split_answer_and_priority(text: str):
 
 def get_problem(full_text_conversation):
     prompt_template = """
+```
 ## CONTEXT
 You are extracting customer problems from Tindahang Tapat support conversations. Tindahang Tapat is a digital platform enabling sari-sari stores to order groceries via mobile phone. Your output will be stored in a vector database for RAG-based support automation.
 
@@ -622,64 +623,76 @@ Extract the **primary functional problem** that prompted the customer to contact
 - **Functional focus**: Describe system behavior, not customer emotions
 - **Actionable language**: Use verbs that describe what went wrong
 - **Consistent terminology**: Apply standardized platform vocabulary
-- **Generic applicability**: Remove unique identifiers while preserving problem essence
+- **Generic applicability**: Remove ALL unique identifiers while preserving problem essence
 - **Search optimization**: Include keywords support agents would use to find solutions
 
-## STANDARDIZATION GUIDELINES
+## MANDATORY STANDARDIZATION RULES
 
-### Content Normalization
-**Products & Brands**
-- "Nescafe 3-in-1 sachets" → "instant coffee products"
-- "Tide powder 1kg" → "laundry detergent"
-- "Lucky Me noodles" → "instant noodle products"
+### CRITICAL: Product Normalization
+**ALWAYS replace ALL specific product names with "items"**
+- "Nescafe 3-in-1 sachets" → "items"
+- "Tide powder 1kg" → "items"
+- "Lucky Me noodles" → "items"
+- "Coca-Cola 1.5L" → "items"
+- "Pantene shampoo" → "items"
+- "Kopiko coffee" → "items"
+- "Maggi seasoning" → "items"
+- ANY brand name or specific product → "items"
 
+### Other Standardizations
 **Customer References**
-- "Store owner Maria from Bataan" → "store owner"
-- "My sari-sari store in Quezon City" → "customer's store"
-- "Order #TT240156" → "customer order"
+- Any customer name → "customer"
+- Any store name/location → "customer's store"
+- Any order number → "customer order"
+- Any account details → "customer account"
 
 **Technical Terms**
-- "App crashed" → "mobile application stopped responding"
-- "Payment failed" → "payment processing error occurred"
-- "Can't login" → "authentication failure during login process"
+- "App crashed/froze/stopped" → "mobile application became unresponsive"
+- "Payment failed/declined/error" → "payment processing failed"
+- "Can't login/access" → "authentication failed"
+- "Won't load/loading" → "content failed to load"
 
 **Process References**
-- "Ordering process" → "product ordering workflow"
-- "Checkout" → "order finalization process"
-- "Delivery tracking" → "order status monitoring"
+- "Ordering/checkout process" → "order placement process"
+- "Delivery tracking" → "order status tracking"
+- "Cart/basket" → "shopping cart"
 
-### Content Exclusions
-**Remove completely:**
-- Greetings, closings, courtesies
-- Agent responses and solutions
-- Timestamps, reference numbers
-- Emotional expressions ("frustrated", "disappointed")
-- Repetitive explanations of the same issue
-
-**Preserve:**
-- Technical symptoms and error conditions
-- User actions that triggered the problem
-- System responses or lack thereof
-- Workflow step where issue occurred
+### Absolute Exclusions
+**NEVER include:**
+- Any brand names, product names, or specific item descriptions
+- Customer names, store names, locations
+- Order numbers, account IDs, reference codes
+- Agent names or responses
+- Timestamps or dates
+- Emotional language ("frustrated", "angry", "disappointed")
+- Greetings or pleasantries
+- Multiple explanations of the same issue
 
 ## CONVERSATION DATA
 ```
 {conversation}
 ```
 
-## OUTPUT INSTRUCTIONS
-Extract and output ONLY the standardized problem statement. Follow these rules:
-- Use exactly 2-3 sentences
-- Start directly with the problem (no preamble)
+## CRITICAL INSTRUCTIONS
+1. Read the conversation carefully
+2. Identify the PRIMARY technical/functional problem
+3. Apply ALL standardization rules - especially product normalization
+4. Write EXACTLY 2-3 sentences describing the problem
+5. Double-check that NO specific product names remain
+6. Ensure the problem statement is generic and searchable
+
+## OUTPUT REQUIREMENTS
+- Start immediately with the problem (no introduction)
+- Use only standardized terminology
 - End with a period
-- If multiple problems exist, focus on the primary/most severe one
-- If no clear problem is identifiable, output exactly: "No identifiable problem."
+- If no clear problem exists, output: "No identifiable problem."
+- If multiple problems exist, focus on the most critical one
 
 ## EXPECTED OUTPUT FORMAT
-[Standardized problem statement optimized for vector similarity search and keyword matching]
+[Standardized problem statement with ALL products normalized as "items"]
 """
     prompt = prompt_template.format(conversation=full_text_conversation)
-    answer = llm_response(prompt)
+    answer = llm_response(prompt, temperature=0.4)
 
     return answer
 
@@ -694,56 +707,94 @@ You are analyzing customer support conversations for Tindahang Tapat, a digital 
 Create a **searchable, generic problem description** that:
 - **Focuses on function over emotion**: Describe what failed/broke, not how customers felt
 - **Uses standard terminology**: Platform features, order processes, payment methods, product categories
-- **Removes specificity**: No customer names, order numbers, specific brands, or timestamps
+- **Removes ALL specificity**: No customer names, order numbers, specific brands, or timestamps
 - **Enables similarity matching**: Use consistent vocabulary for similar issues
-- **Length**: It should be 2-3 sentences.
+- **Length**: Exactly 2-3 sentences
 
 ### Resolution Documentation  
 Provide an **actionable solution summary** that:
 - **Details specific steps**: What the agent did to resolve the issue
 - **Includes verification**: How resolution was confirmed
-- **Notes preventive measures**: Steps to avoid recurrence
+- **Notes preventive measures**: Steps to avoid recurrence (if applicable)
 - **States clear outcome**: "RESOLVED" with method, or "UNRESOLVED" with next steps
-- **Length**: It should be 2-3 sentences.
+- **Length**: Exactly 2-3 sentences
 
-## STANDARDIZATION RULES
+## MANDATORY STANDARDIZATION RULES
 
-### Content Normalization
-- **Products**: "Nescafe 3-in-1" → "instant coffee product"
-- **Customers**: "Mrs. Santos from Quezon City" → "store owner"  
-- **Orders**: "Order #TT2024001" → "customer order"
-- **Amounts**: "₱1,250.00" → "order amount"
-- **Dates/Times**: Remove all temporal references unless process-critical
+### CRITICAL: Product Normalization
+**ALWAYS replace ALL specific product names, brands, and descriptions with "items"**
+- "Nescafe 3-in-1 sachets" → "items"
+- "Tide powder 1kg" → "items"
+- "Lucky Me instant noodles" → "items"
+- "Coca-Cola 1.5L bottles" → "items"
+- "Pantene shampoo 200ml" → "items"
+- "instant coffee product" → "items"
+- "laundry detergent" → "items"
+- "beverage products" → "items"
+- ANY specific product reference → "items"
+
+### Other Critical Normalizations
+**Customer References**
+- Any customer name → "customer"
+- Any store name/location → "customer's store"
+- Any order number/ID → "customer order"
+- Any account details → "customer account"
+- Specific amounts → "order amount" or "payment amount"
+
+**Technical Terms**
+- "App crashed/froze/stopped/won't work" → "mobile application became unresponsive"
+- "Payment failed/declined/error/won't process" → "payment processing failed"
+- "Can't login/access/sign in" → "authentication failed"
+- "Won't load/loading/stuck loading" → "content failed to load"
+- "System error/bug/glitch" → "system malfunction occurred"
+
+**Process References**
+- "Ordering/checkout/purchasing process" → "order placement process"
+- "Delivery tracking/monitoring" → "order status tracking"
+- "Cart/basket/shopping list" → "shopping cart"
+- "Account setup/registration" → "account creation process"
 
 ### Language Standardization
-- **Payment issues**: "payment processing", "transaction failure", "payment method"
-- **Delivery problems**: "delivery scheduling", "logistics coordination", "fulfillment"
-- **Product concerns**: "product availability", "inventory discrepancy", "catalog issue"
-- **Account access**: "login authentication", "account verification", "profile management"
-- **App functionality**: "mobile app", "platform feature", "system functionality"
+- **Payment issues**: "payment processing", "transaction failure", "payment method error"
+- **Delivery problems**: "delivery scheduling issue", "logistics coordination failure", "order fulfillment problem"
+- **Product concerns**: "item availability issue", "inventory discrepancy", "catalog display problem"
+- **Account access**: "login authentication failure", "account verification issue", "profile access problem"
+- **App functionality**: "mobile app malfunction", "platform feature failure", "system functionality error"
 
-### Excluded Content
-Remove entirely:
-- Greetings, sign-offs, pleasantries
-- Agent names, department references  
-- Conversation metadata (timestamps, channel info)
-- Emotional expressions and subjective language
-- Repetitive confirmations or status updates
+### Absolute Exclusions
+**NEVER include:**
+- Any brand names, specific product names, or detailed item descriptions
+- Customer names, store names, specific locations
+- Order numbers, account IDs, reference codes, transaction IDs
+- Agent names, department names, company structure references
+- Timestamps, dates, or time-specific information
+- Monetary amounts (use "order amount" instead)
+- Emotional language ("frustrated", "angry", "happy", "satisfied")
+- Greetings, sign-offs, pleasantries, or social conversation
+- Repetitive confirmations or multiple explanations of same issue
 
 ## CONVERSATION DATA
 {conversation}
 
+## CRITICAL INSTRUCTIONS
+1. Read the conversation completely
+2. Identify the PRIMARY functional problem and its resolution
+3. Apply ALL standardization rules - especially product normalization to "items"
+4. Write exactly 2-3 sentences for each section
+5. Verify NO specific product names, brands, or identifiers remain
+6. Ensure language is generic and searchable
+
 ## OUTPUT REQUIREMENTS
-Provide ONLY the CORE PROBLEM STATEMENT and RESOLUTION below. No explanations, commentary, or additional text.
+Provide ONLY the sections below. No explanations, commentary, or additional text.
 
 CORE PROBLEM STATEMENT:
-[Generic, searchable problem description optimized for vector similarity and keyword matching]
+[Generic, searchable problem description with ALL products normalized as "items"]
 
 RESOLUTION:
 [Actionable solution steps and final status: RESOLVED or UNRESOLVED with next steps]
 """
     prompt = prompt_template.format(conversation=full_text_conversation)
-    answer = llm_response(prompt)
+    answer = llm_response(prompt, temperature=0.4)
 
     return answer
 
