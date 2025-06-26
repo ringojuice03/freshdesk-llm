@@ -217,24 +217,25 @@ def latest_tickets(request):
             is_customer_last_msg = True
             last_customer_msg = last_msg['body_text']
 
-        generated_response = "Only respond when the customer messaged last."
+        answer = "Only respond when the customer messaged last."
         if is_customer_last_msg:
             classification_details = rag_classification(problem)
             query_type, specific_issue_type = split_query_and_issue_type(classification_details)
-            generated_response = rag(problem, query_type)
+            answer, priority = rag(problem, query_type)
             print(f'Query type: {query_type}')
             print(f'Specific issue type: {specific_issue_type}')
+            print(f'Priority: {priority}')
+            print(f'Answer: {answer}')
             
-            # generated_response = generate_response(last_customer_msg, full_text_conversation)
-
         ticket_list.append({
             'id': ticket_id,
             'name': contact_name,
             'conversation': parsed_conversations['ordered_conversation_details'],
-            'generated_response': generated_response,
+            'generated_response': answer,
             'payload': payload,
             'query_type': query_type,
             'specific_issue_type': specific_issue_type,
+            'priority': priority,
         })
         
         print('----------')
@@ -251,12 +252,13 @@ def rag_classification(problem: str) -> str:
 
 
 def rag(problem: str, query_type: str) -> str:
-    print(f'Query type at rag: {query_type}')
     search_response = rrf_filter_search(problem, query_type)
     prompt = answer_ticket_prompt(problem, search_response)
     response = llm_response(prompt)
 
-    return response
+    answer, priority = split_answer_and_priority(response)
+
+    return answer, priority
 
 
 def rrf_search(problem: str, limit: int = 5) -> str:
@@ -338,8 +340,9 @@ def rrf_filter_search(problem: str, query_type: str, limit: int = 5) -> str:
     context = ""
     for result in search_results.points:
         problem = result.payload['problem']
-        resolution = result.payload['resolution'] 
-        context += f'Problem: {problem}\nResolution: {resolution}\n\n'
+        resolution = result.payload['resolution']
+        priority = result.payload['priority']
+        context += f'Problem: {problem}\nResolution: {resolution}\nPriority: {priority}\n\n'
 
     return context
 
@@ -402,37 +405,63 @@ SPECIFIC ISSUE TYPE:
 
 def answer_ticket_prompt(problem: str, context: str) -> str:
     prompt_template = """
-You are a customer support representative for Tindahang Tapat, a digital platform that enables sari-sari stores to order groceries via mobile phone.
+## ROLE & CONTEXT
+You are a customer support representative for Tindahang Tapat, a digital platform enabling sari-sari stores to order groceries via mobile phone. Generate appropriate responses using only the provided knowledge base context.
 
-## OBJECTIVE
-Provide a helpful answer to the customer's problem using only the information available in the provided context.
+## PRIMARY OBJECTIVE
+Deliver accurate, helpful solutions to customer problems based strictly on available context information, while maintaining professional service standards.
 
-## RESPONSE GUIDELINES
-- Base your answer **exclusively** on the provided context
-- Provide clear, actionable solutions when available
-- Use professional, friendly customer service language
-- If the context doesn't contain relevant information, respond with: "I don't have information about this issue in my current resources. Please contact our support team for further assistance."
+## RESPONSE METHODOLOGY
 
-## REFERENCE CONTEXT
+### Content Requirements
+- **Context fidelity**: Use ONLY information from the provided context
+- **Solution focus**: Prioritize actionable steps and clear guidance
+- **Completeness**: Address all aspects of the customer's problem when context allows
+- **Accuracy**: Never infer or assume details not explicitly stated in context
+
+### Communication Standards
+- **Professional tone**: Courteous, confident, and solution-oriented
+- **Filipino market awareness**: Use terminology familiar to sari-sari store owners
+- **Clarity**: Avoid technical jargon; use simple, direct language
+- **Brevity**: Concise responses (2-4 sentences) that fully address the issue
+
+### Fallback Protocol
+When context is insufficient, use exactly: *"I don't have specific information about this issue in my current resources. Please contact our support team at [support contact] for immediate assistance with your concern."*
+
+## INPUT DATA
+
+### Knowledge Base Context
 ```
 {context}
 ```
 
-## CUSTOMER PROBLEM
+### Customer Problem
 ```
 {problem}
 ```
 
+## RESPONSE GENERATION RULES
+
+### Content Validation
+1. **Context check**: Ensure solution exists in provided context
+2. **Completeness check**: Verify all problem aspects are addressed
+3. **Accuracy check**: Confirm no assumptions beyond context are made
+4. **Tone check**: Maintain professional, helpful customer service voice
+
+### Quality Standards
+- **Actionable**: Include specific steps when solutions are available
+- **Comprehensive**: Address root cause when context provides sufficient detail
+- **Preventive**: Mention prevention tips if included in context
+- **Follow-up ready**: Set clear expectations for next steps if needed
+
 ## OUTPUT REQUIREMENTS
-- Provide a direct, helpful response
-- No meta-commentary or explanations about the process
-- Stay within the bounds of the provided context
-- The output should ONLY contain the ANSWER. DO NOT INCLUDE ANYTHING ELSE.
+Provide exactly two sections with no additional commentary, explanations, or formatting:
 
-## OUTPUT FORMAT
+ANSWER
+[Complete customer response based on context - 2-4 sentences addressing their problem with specific, actionable guidance]
 
-ANSWER:
-[Your complete, 2-3 sentence, response to the customer]
+PRIORITY  
+[Single priority level: Low, Medium, High, or Urgent]
 """
     prompt = prompt_template.format(context=context, problem=problem)
     
@@ -521,48 +550,81 @@ def split_query_and_issue_type(text: str):
         return None, None
 
 
+def split_answer_and_priority(text: str):
+    pattern = r"""
+        [#\*\s]*ANSWER[:\s\*\#]*
+        (.*?)                                  
+        [#\*\s]*PRIORITY[:\s\*\#]*        
+        (.*)              
+    """
+
+    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE | re.VERBOSE)
+    if match:
+        answer = match.group(1).strip()
+        priority = match.group(2).strip()
+        return answer, priority
+    else:
+        return None, None
+
+
 def get_problem_and_resolution(full_text_conversation):
     prompt_template = """
-You are analyzing customer support conversations for Tindahang Tapat, a digital platform that enables sari-sari stores to order groceries via mobile phone.
+## CONTEXT
+You are analyzing customer support conversations for Tindahang Tapat, a digital platform enabling sari-sari stores to order groceries via mobile phone. Your task is to extract standardized problem-resolution pairs for a RAG knowledge base.
 
-## OBJECTIVE
-Extract and structure key problem-resolution pairs from the conversation below for storage in a vector database used by a RAG system.
+## ANALYSIS REQUIREMENTS
 
-## OUTPUT REQUIREMENTS
+### Problem Statement Extraction
+Create a **searchable, generic problem description** that:
+- **Focuses on function over emotion**: Describe what failed/broke, not how customers felt
+- **Uses standard terminology**: Platform features, order processes, payment methods, product categories
+- **Removes specificity**: No customer names, order numbers, specific brands, or timestamps
+- **Enables similarity matching**: Use consistent vocabulary for similar issues
+- **Length**: 2-3 sentences maximum
 
-### Core Problem Statement (2-3 sentences)
-- **Functional focus**: Describe the actual issue, not emotional reactions
-- **Generic terminology**: Use product categories instead of brand names
-- **Reusable format**: Remove customer-specific identifiers
-- **Searchable language**: Use standard platform terminology
+### Resolution Documentation  
+Provide an **actionable solution summary** that:
+- **Details specific steps**: What the agent did to resolve the issue
+- **Includes verification**: How resolution was confirmed
+- **Notes preventive measures**: Steps to avoid recurrence
+- **States clear outcome**: "RESOLVED" with method, or "UNRESOLVED" with next steps
+- **Length**: 2-3 sentences maximum
 
-### Resolution Summary (2-3 sentences)
-- **Action-oriented**: Include specific steps taken by the agent
-- **Complete process**: Mention preventive measures or follow-up actions
-- **Clear status**: If unresolved, state "UNRESOLVED" and note next steps
+## STANDARDIZATION RULES
 
-### Content Processing Rules
+### Content Normalization
+- **Products**: "Nescafe 3-in-1" → "instant coffee product"
+- **Customers**: "Mrs. Santos from Quezon City" → "store owner"  
+- **Orders**: "Order #TT2024001" → "customer order"
+- **Amounts**: "₱1,250.00" → "order amount"
+- **Dates/Times**: Remove all temporal references unless process-critical
 
-**Remove:**
-- Timestamps, agent names, signatures, greetings
-- Pleasantries, repetitive statements
-- Customer-specific identifiers (names, phone numbers, order IDs)
+### Language Standardization
+- **Payment issues**: "payment processing", "transaction failure", "payment method"
+- **Delivery problems**: "delivery scheduling", "logistics coordination", "fulfillment"
+- **Product concerns**: "product availability", "inventory discrepancy", "catalog issue"
+- **Account access**: "login authentication", "account verification", "profile management"
+- **App functionality**: "mobile app", "platform feature", "system functionality"
 
-**Generalize:**
-- Brand names: "Nescafe stick" → "instant coffee product"
-- Product references: "Tide detergent" → "laundry detergent"
-- Customer details: Make scenarios broadly applicable
-- Technical terms: Use standardized platform language
+### Excluded Content
+Remove entirely:
+- Greetings, sign-offs, pleasantries
+- Agent names, department references  
+- Conversation metadata (timestamps, channel info)
+- Emotional expressions and subjective language
+- Repetitive confirmations or status updates
 
 ## CONVERSATION DATA
 {conversation}
 
-## OUTPUT FORMAT (The output should be optimized for hybrid retrieval (dense + BM25) in RAG systems. Output ONLY the CORE PROBLEM STATEMENT and RESOLUTION. DO NOT INCLUDE ANYTHING ELSE.)
-CORE PROBLEM STATEMENT:
-[Standardized problem description for knowledge base search]
+## OUTPUT REQUIREMENTS
+Provide ONLY the structured output below. No explanations, commentary, or additional text.
 
-RESOLUTION:
-[Solution steps and outcome, or "UNRESOLVED" with next steps]
+**CORE PROBLEM STATEMENT:**
+[Generic, searchable problem description optimized for vector similarity and keyword matching]
+
+**RESOLUTION:**
+[Actionable solution steps and final status: RESOLVED or UNRESOLVED with next steps]
 """
     prompt = prompt_template.format(conversation=full_text_conversation)
     answer = llm_response(prompt)
@@ -572,45 +634,78 @@ RESOLUTION:
 
 def get_problem(full_text_conversation):
     prompt_template = """
-You are a customer support representative for Tindahang Tapat, a digital platform that enables sari-sari stores to order groceries via mobile phone.
+## CONTEXT
+You are extracting customer problems from Tindahang Tapat support conversations. Tindahang Tapat is a digital platform enabling sari-sari stores to order groceries via mobile phone. Your output will be stored in a vector database for RAG-based support automation.
 
-## OBJECTIVE
-Extract and structure the customer's core problem from the conversation below for storage in a vector database used by a RAG system.
+## ANALYSIS OBJECTIVE
+Extract the **primary functional problem** that prompted the customer to contact support, formatted for optimal knowledge base retrieval.
 
-## OUTPUT REQUIREMENTS
+## PROBLEM STATEMENT REQUIREMENTS
 
-### Core Problem Statement
-Create a 2-3 sentence problem statement that is:
-- **Functional**: Focus on the actual issue, not emotional expressions
-- **Generic**: Use product categories instead of brand names
-- **Reusable**: Remove customer-specific details (names, phone numbers, order IDs)
-- **Searchable**: Use standard terminology for knowledge base retrieval
+### Structure (2-3 sentences maximum)
+1. **Issue identification**: What specific functionality failed or caused confusion
+2. **Context**: Under what circumstances the problem occurs
+3. **Impact**: How it affects the customer's workflow (optional, if relevant)
 
-### Content Processing Rules
+### Quality Standards
+- **Functional focus**: Describe system behavior, not customer emotions
+- **Actionable language**: Use verbs that describe what went wrong
+- **Consistent terminology**: Apply standardized platform vocabulary
+- **Generic applicability**: Remove unique identifiers while preserving problem essence
+- **Search optimization**: Include keywords support agents would use to find solutions
 
-**Remove:**
-- Timestamps, agent names, email signatures
-- Greetings, pleasantries, repetitive statements
-- Customer-specific identifiers
+## STANDARDIZATION GUIDELINES
 
-**Generalize:**
-- Product names: "Nescafe stick" → "instant coffee product"
-- Brand names: "Tide detergent" → "laundry detergent"
-- Technical terms: Use standardized platform terminology
-- Customer details: Make scenarios broadly applicable
+### Content Normalization
+**Products & Brands**
+- "Nescafe 3-in-1 sachets" → "instant coffee products"
+- "Tide powder 1kg" → "laundry detergent"
+- "Lucky Me noodles" → "instant noodle products"
 
-**Maintain:**
-- Core functionality issues
-- Process flow problems
-- System behavior descriptions
+**Customer References**
+- "Store owner Maria from Bataan" → "store owner"
+- "My sari-sari store in Quezon City" → "customer's store"
+- "Order #TT240156" → "customer order"
+
+**Technical Terms**
+- "App crashed" → "mobile application stopped responding"
+- "Payment failed" → "payment processing error occurred"
+- "Can't login" → "authentication failure during login process"
+
+**Process References**
+- "Ordering process" → "product ordering workflow"
+- "Checkout" → "order finalization process"
+- "Delivery tracking" → "order status monitoring"
+
+### Content Exclusions
+**Remove completely:**
+- Greetings, closings, courtesies
+- Agent responses and solutions
+- Timestamps, reference numbers
+- Emotional expressions ("frustrated", "disappointed")
+- Repetitive explanations of the same issue
+
+**Preserve:**
+- Technical symptoms and error conditions
+- User actions that triggered the problem
+- System responses or lack thereof
+- Workflow step where issue occurred
 
 ## CONVERSATION DATA
 ```
 {conversation}
 ```
 
-# OUTPUT FORMAT
-[Deliver ONLY the standardized problem statement, DO NOT include anything else in the output. If no clear problem exists, output "No identifiable problem."]
+## OUTPUT INSTRUCTIONS
+Extract and output ONLY the standardized problem statement. Follow these rules:
+- Use exactly 2-3 sentences
+- Start directly with the problem (no preamble)
+- End with a period
+- If multiple problems exist, focus on the primary/most severe one
+- If no clear problem is identifiable, output exactly: "No identifiable problem."
+
+## EXPECTED OUTPUT FORMAT
+[Standardized problem statement optimized for vector similarity search and keyword matching]
 """
     prompt = prompt_template.format(conversation=full_text_conversation)
     answer = llm_response(prompt)
@@ -704,90 +799,3 @@ def parse_freshdesk_conversations(conversations, ticket_description):
         'agent_conversation': agent_conversation,
         'ordered_conversation_details': ordered_conversation_details,
     }
-
-
-def google_translate(conversations) -> str:
-    print('\nTranslating...')
-    prompt_template = """
-You are an expert linguist and translator specializing in preserving semantic meaning and key terminology. Your task is to translate a given conversation into clear, natural-sounding English.
-
-**Context:** The conversation is relevant to Tindahang Tapat's operations, which is a company of Nueca. Understanding this business context will help ensure accurate translation of company-specific terms, operational procedures, and industry-related vocabulary.
-
-**Key Requirements for Translation:**
-1.  **Semantic Fidelity:** The translated English conversation must accurately convey the original meaning, intent, and nuances of the Bikol, Tagalog, or English (or combination thereof) conversation.
-2.  **Keyword Preservation:** Identify and retain critical keywords, technical terms, proper nouns, and domain-specific vocabulary. If a direct English equivalent for a keyword is not perfectly semantically aligned, prioritize the most common or closest English counterpart while ensuring the original context is maintained.
-3.  **Contextual Accuracy:** Understand the conversational flow and ensure that pronouns, references, and implied meanings are correctly translated based on the full context of the conversation.
-4.  **Natural English:** The output should read as fluent and grammatically correct English, avoiding overly literal translations that sound unnatural.
-5.  **Business Context Awareness:** Consider Tindahang Tapat's business operations and Nueca's corporate context when translating company-specific terminology, processes, and references.
-
-**Important Note for Embedding:** The translated English output will be used for vector embedding (sparse and dense techniques). Therefore, the clarity, accuracy, and presence of key terms in the English translation are paramount for effective information retrieval and semantic search.
-
-**Conversation to Translate:**
-{conversation}
-
-**Translated English Conversation:**
-"""
-
-    prompt = prompt_template.format(conversation=conversations)
-    response = gemini_client.models.generate_content(
-        model='gemini-2.0-flash',
-        contents=prompt
-    )
-
-    return response.candidates[0].content.parts[0].text
-
-
-def generate_response(last_customer_msg: str, conversation: str) -> str:
-    prompt_template = """
-You are a dedicated Customer Service Representative for Nueca's Tindahang Tapat, an online platform designed to empower 'sari-sari' stores across the Philippines by facilitating their grocery orders. Your primary goal is to provide clear, helpful, and empathetic assistance to our valued store owners.
-
-Carefully review the entire conversation history to understand the full context of the customer's interaction. Your response should be **comprehensive and thorough**, providing a detailed answer that addresses all aspects of the customer's concern. While being detailed, ensure your response remains **direct and focused on providing a solution or clear information.**
-
-It is crucial that your tone is **warm, empathetic, and reassuring**, acknowledging the customer's feelings and concerns. Beyond just answering, your response should be **engaging and address their concerns thoroughly**, leaving no stone unturned and proactively anticipating follow-up questions to provide a complete resolution.
-
-**Conversation History:**
-{conversation}
-
-**Customer's Specific Concern/Last Message:**
-{last_customer_msg}
-
-**Make it 3 sentences long at maximum. Your Detailed, Empathetic, and Thorough Response (as a Customer Service Representative):**
-"""
-
-    prompt = prompt_template.format(conversation=conversation, last_customer_msg=last_customer_msg)
-    response = gemini_client.models.generate_content(
-        model='gemini-2.0-flash',
-        contents=prompt
-    )
-
-    return response.candidates[0].content.parts[0].text
-
-
-def rag_response(last_customer_msg: str, conversation: str) -> str:
-    prompt_template = """
-You are a dedicated Customer Service Representative for Nueca's Tindahang Tapat, an online platform designed to empower 'sari-sari' stores across the Philippines by facilitating their grocery orders. Your primary goal is to provide clear, helpful, and empathetic assistance to our valued store owners.
-
-Carefully review the entire conversation history to understand the full context of the customer's interaction. Your response should be **comprehensive and thorough**, providing a detailed answer that addresses all aspects of the customer's concern. While being detailed, ensure your response remains **direct and focused on providing a solution or clear information.**
-
-It is crucial that your tone is **warm, empathetic, and reassuring**, acknowledging the customer's feelings and concerns. Beyond just answering, your response should be **engaging and address their concerns thoroughly**, leaving no stone unturned and proactively anticipating follow-up questions to provide a complete resolution.
-
-Most importantly, use the CONTEXT as the basis for catering the customer's concerns/queries.
-
-**CONTEXT:**
-{context}
-
-**Conversation History:**
-{conversation}
-
-**Customer's Specific Concern/Last Message:**
-{last_customer_msg}
-
-**Make it 3 sentences long at maximum. Your Detailed, Empathetic, and Thorough Response (as a Customer Service Representative):**
-"""
-    prompt = prompt_template.format(conversation=conversation, last_customer_msg=last_customer_msg)
-    response = gemini_client.models.generate_content(
-        model='gemini-2.0-flash',
-        contents=prompt
-    )
-
-    return response.candidates[0].content.parts[0].text
