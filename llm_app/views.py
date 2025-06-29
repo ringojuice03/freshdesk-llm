@@ -8,8 +8,7 @@ from django.http import HttpResponse
 import json
 
 from groq import Groq
-# groq_api_key = os.environ.get('GROQ_API_KEY')
-groq_api_key = "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"
+groq_api_key = os.environ.get('GROQ_API_KEY')
 groq_client = Groq(api_key=groq_api_key)
 
 from google import genai
@@ -83,16 +82,13 @@ def hello_world(request):
 
             doc = get_payload(ticket_description)
 
-            raw_conversations = get_all_conversations(doc['id'], domain, headers, auth)
-            parsed_conversations = parse_freshdesk_conversations(raw_conversations, ticket_description)
+            parsed_conversations = get_all_conversations(doc['id'], domain, headers, auth, ticket_description)
             full_text_conversation = parsed_conversations['full_text_conversation']
 
-            problem_and_resolution = get_problem_and_resolution(full_text_conversation)
-            problem, resolution = split_problem_and_resolution(problem_and_resolution)
+            problem, resolution = get_problem_and_resolution(full_text_conversation)
             doc['problem'] = problem
             doc['resolution'] = resolution
 
-            print(problem_and_resolution)
             print('-----')
 
         fixed_tickets.append(doc)
@@ -123,8 +119,7 @@ def latest_tickets(request):
 
         payload = get_payload(ticket_description)
 
-        raw_conversations = get_all_conversations(ticket_id, domain, headers, auth)
-        parsed_conversations = parse_freshdesk_conversations(raw_conversations, ticket_description)
+        parsed_conversations = get_all_conversations(ticket_id, domain, headers, auth, ticket_description)
         full_text_conversation = parsed_conversations['full_text_conversation']
 
         problem = get_problem(full_text_conversation)
@@ -140,8 +135,7 @@ def latest_tickets(request):
 
         answer = "Only respond when the customer messaged last."
         if is_customer_last_msg:
-            classification_details = rag_classification(problem)
-            query_type, specific_issue_type = split_query_and_issue_type(classification_details)
+            query_type, specific_issue_type = rag_classification(problem)
             answer, priority = rag(problem, query_type)
             print(f'Query type: {query_type}')
             print(f'Specific issue type: {specific_issue_type}')
@@ -168,14 +162,24 @@ def rag_classification(problem: str) -> str:
     prompt = classification_prompt(problem, search_response)
     response = llm_response(prompt)
 
-    return response
+    query_type = None
+    specific_issue_type = None
+
+    while query_type is None or specific_issue_type is None:
+        query_type, specific_issue_type = split_query_and_issue_type(response)
+
+    return query_type, specific_issue_type
 
 def rag(problem: str, query_type: str) -> str:
     search_response = rrf_filter_search(problem, query_type)
     prompt = answer_ticket_prompt(problem, search_response)
     response = llm_response(prompt)
 
-    answer, priority = split_answer_and_priority(response)
+    answer = None
+    priority = None
+    
+    while answer is None or priority is None: 
+        answer, priority = split_answer_and_priority(response)
 
     return answer, priority
 
@@ -487,7 +491,7 @@ def embed_tickets(request):
     print('Done')    
     return render(request, 'embed.html')
 
-def get_payload(ticket_description):
+def get_payload(ticket_description) -> dict:
     priority_integer = ticket_description.get('priority')
     priority = PRIORITY_MAP.get(priority_integer, "Unknown")
 
@@ -509,7 +513,7 @@ def get_payload_to_json(request):
     tickets_payload = []
 
     print('Fetching tickets')
-    for ticket_id in range(201, 501):
+    for ticket_id in range(1337, 1501):
         print(ticket_id)
         description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
         response = requests.get(description_url, headers=headers, auth=auth)
@@ -526,16 +530,19 @@ def get_payload_to_json(request):
         if payload['query_type'] == None: continue 
         if payload['specific_issue'] == None: continue
 
-        raw_conversations = get_all_conversations(ticket_id, domain, headers, auth)
-        parsed_conversations = parse_freshdesk_conversations(raw_conversations, ticket_description)
+        parsed_conversations = get_all_conversations(ticket_id, domain, headers, auth, ticket_description)
         full_text_conversation = parsed_conversations['full_text_conversation']
 
-        problem_and_resolution = get_problem_and_resolution(full_text_conversation)
-        problem, resolution = split_problem_and_resolution(problem_and_resolution)
+        problem = None
+        resolution = None
+
+        while problem is None or resolution is None:
+            problem, resolution = get_problem_and_resolution(full_text_conversation)
+
         payload['problem'] = problem
         payload['resolution'] = resolution
 
-        print(problem_and_resolution)
+        print(f'Problem: {problem}\n\nResolution: {resolution}')
         print('-----')
 
         tickets_payload.append(payload) 
@@ -555,7 +562,7 @@ def get_payload_to_json(request):
 
     return render(request, 'json.html')
 
-def split_problem_and_resolution(text):
+def split_problem_and_resolution(text) -> tuple[str, str]:
     pattern = r"""
         [#\*\s]*CORE\s+PROBLEM\s+STATEMENT[:\s\#\*]*
         (.*?)                                  
@@ -571,7 +578,7 @@ def split_problem_and_resolution(text):
     else:
         return None, None
 
-def split_query_and_issue_type(text: str):
+def split_query_and_issue_type(text: str) -> tuple[str, str]:
     pattern = r"""
         [#\*\s]*QUERY\s+TYPE[:\s]*
         (.*?)                                  
@@ -587,7 +594,7 @@ def split_query_and_issue_type(text: str):
     else:
         return None, None
 
-def split_answer_and_priority(text: str):
+def split_answer_and_priority(text: str) -> tuple[str, str]:
     pattern = r"""
         [#\*\s]*ANSWER[:\s\*\#]*
         (.*?)                                  
@@ -603,7 +610,7 @@ def split_answer_and_priority(text: str):
     else:
         return None, None
 
-def get_problem(full_text_conversation):
+def get_problem(full_text_conversation) -> str:
     prompt_template = """
 ```
 ## CONTEXT
@@ -696,7 +703,7 @@ Extract the **primary functional problem** that prompted the customer to contact
 
     return answer
 
-def get_problem_and_resolution(full_text_conversation):
+def get_problem_and_resolution(full_text_conversation) -> tuple[str, str]:
     prompt_template = """
 ## CONTEXT
 You are analyzing customer support conversations for Tindahang Tapat, a digital platform enabling sari-sari stores to order groceries via mobile phone. Your task is to extract standardized problem-resolution pairs for a RAG knowledge base.
@@ -794,9 +801,15 @@ RESOLUTION:
 [Actionable solution steps and final status: RESOLVED or UNRESOLVED with next steps]
 """
     prompt = prompt_template.format(conversation=full_text_conversation)
-    answer = llm_response(prompt, temperature=0.4)
 
-    return answer
+    problem = None
+    resolution = None
+
+    while problem is None or resolution is None:
+        response = llm_response(prompt, temperature=0.4)
+        problem, resolution = split_problem_and_resolution(response)
+
+    return problem, resolution
 
 def get_contact(requestor_id, domain, headers, auth):
     contact_url = f"https://{domain}.freshdesk.com/api/v2/contacts/{requestor_id}"
@@ -805,9 +818,10 @@ def get_contact(requestor_id, domain, headers, auth):
 
     return contact
 
-def get_all_conversations(ticket_id, domain, headers, auth):
+def get_all_conversations(ticket_id, domain, headers, auth, ticket_description):
     conversations = []
     url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}/conversations"
+
     while url:
         response = requests.get(url, headers=headers, auth=auth)
         if response.status_code != 200:
@@ -823,9 +837,11 @@ def get_all_conversations(ticket_id, domain, headers, auth):
         else:
             url = None
 
-    return conversations
+    parsed_conversations = parse_freshdesk_conversations(conversations, ticket_description)
 
-def parse_freshdesk_conversations(conversations, ticket_description):
+    return parsed_conversations
+
+def parse_freshdesk_conversations(conversations, ticket_description) -> dict:
     sorted_conversations = sorted(conversations, key=lambda x: x['created_at'])
     
     full_text_conversation = ""
