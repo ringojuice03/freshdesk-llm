@@ -425,20 +425,20 @@ def embed_tickets(request):
 
     print('Initializing qdrant client')
     
-    # qd_client.create_collection(
-    #     collection_name=collection_name,
-    #     vectors_config={
-    #         "baai-large": models.VectorParams(
-    #             size = 1024,
-    #             distance = models.Distance.COSINE
-    #         )
-    #     },
-    #     sparse_vectors_config={
-    #         "bm25": models.SparseVectorParams(
-    #             modifier = models.Modifier.IDF
-    #         )
-    #     },
-    # )
+    qd_client.create_collection(
+        collection_name=collection_name,
+        vectors_config={
+            "baai-large": models.VectorParams(
+                size = 1024,
+                distance = models.Distance.COSINE
+            )
+        },
+        sparse_vectors_config={
+            "bm25": models.SparseVectorParams(
+                modifier = models.Modifier.IDF
+            )
+        },
+    )
 
     print('Uploading data points...')
     qd_client.upsert(
@@ -513,7 +513,7 @@ def get_payload_to_json(request):
     tickets_payload = []
 
     print('Fetching tickets')
-    for ticket_id in range(1337, 1501):
+    for ticket_id in range(367, 501):
         print(ticket_id)
         description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
         response = requests.get(description_url, headers=headers, auth=auth)
