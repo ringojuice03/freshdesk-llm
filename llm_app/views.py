@@ -15,6 +15,9 @@ from google import genai
 gemini_api_key = os.environ.get('GEMINI_API_KEY')
 gemini_client = genai.Client(api_key=gemini_api_key)
 
+import ollama
+ollama.pull("mistral")
+
 from qdrant_client import models, QdrantClient
 qd_client = QdrantClient('http://localhost:6333')
 collection_name = 'freshdesk-tickets-rag'
@@ -100,9 +103,10 @@ def hello_world(request):
     return render(request, 'hello.html')
 
 def latest_tickets(request):
-    tickets_url = f"https://{domain}.freshdesk.com/api/v2/tickets?order_by=created_at&order_type=desc&per_page=5"
+    tickets_url = f"https://{domain}.freshdesk.com/api/v2/tickets?order_by=created_at&order_type=desc&per_page=3"
     ticket_response = requests.get(tickets_url, headers=headers, auth=auth)
     tickets = ticket_response.json() if ticket_response.status_code == 200 else []
+
     ticket_list = []
 
     # for ticket in range(0, 1):
@@ -136,7 +140,11 @@ def latest_tickets(request):
         answer = "Only respond when the customer messaged last."
         if is_customer_last_msg:
             query_type, specific_issue_type = rag_classification(problem)
+            query_type_no_context, specific_issue_type_no_context = rag_classification(problem, use_context = False)
+            
             answer, priority = rag(problem, query_type)
+            answer_no_context, priority_no_context = rag(problem, query_type, use_context = False)
+
             print(f'Query type: {query_type}')
             print(f'Specific issue type: {specific_issue_type}')
             print(f'Priority: {priority}')
@@ -146,20 +154,28 @@ def latest_tickets(request):
             'id': ticket_id,
             'name': contact_name,
             'conversation': parsed_conversations['ordered_conversation_details'],
-            'generated_response': answer,
             'payload': payload,
+
+            # rag
             'query_type': query_type,
             'specific_issue_type': specific_issue_type,
+            'generated_response': answer,
             'priority': priority,
+
+            # non-rag
+            'query_type_no_context': query_type_no_context, 
+            'specific_issue_type_no_context': specific_issue_type_no_context,
+            'answer_no_context': answer_no_context,
+            'priority_no_context': priority_no_context,
         })
         
         print('----------')
 
     return render(request, 'response.html', {'tickets': ticket_list,})
 
-def rag_classification(problem: str) -> str:
+def rag_classification(problem: str, use_context: bool = True) -> str:
     search_response = rrf_search(problem)
-    prompt = classification_prompt(problem, search_response)
+    prompt = classification_prompt(problem, search_response, use_context)
     response = llm_response(prompt)
 
     query_type = None
@@ -170,9 +186,9 @@ def rag_classification(problem: str) -> str:
 
     return query_type, specific_issue_type
 
-def rag(problem: str, query_type: str) -> str:
+def rag(problem: str, query_type: str, use_context: bool = True) -> str:
     search_response = rrf_filter_search(problem, query_type)
-    prompt = answer_ticket_prompt(problem, search_response)
+    prompt = answer_ticket_prompt(problem, search_response, use_context)
     response = llm_response(prompt)
 
     answer = None
@@ -268,7 +284,7 @@ def rrf_filter_search(problem: str, query_type: str, limit: int = 5) -> str:
 
     return context
 
-def classification_prompt(problem: str, context: str) -> str:
+def classification_prompt(problem: str, context: str, use_context: bool = True) -> str:
     prompt_template = """
 You are a customer support representative for Tindahang Tapat, a digital platform that enables sari-sari stores to order groceries via mobile phone.
 
@@ -277,12 +293,12 @@ Classify the customer's problem into the appropriate query type and specific iss
 
 ## CLASSIFICATION FRAMEWORK
 
-### Available Query Types
+### AVAILABLE QUERY TYPES
 ```
 {query_type_choices}
 ```
 
-### Available Specific Issue Types
+### AVAILABLE SPECIFIC ISSUE TYPES
 ```
 {specific_issue_choices}
 ```
@@ -290,7 +306,7 @@ Classify the customer's problem into the appropriate query type and specific iss
 ## CLASSIFICATION GUIDELINES
 - Use the **CONTEXT** as your primary reference for accurate classification
 - Select the **most specific** category that matches the problem
-- Choose only **one** query type and **one** specific issue type
+- Choose only **one** QUERY TYPE and **one** SPECIFIC ISSUE TYPE
 - If uncertain between categories, prioritize the one that best captures the core functionality issue
 - Output **NONE** if no category adequately fits the problem
 
@@ -310,22 +326,75 @@ Classify the customer's problem into the appropriate query type and specific iss
 - Use **NONE** if no suitable category exists
 
 ## OUTPUT FORMAT
+Provide exactly two sections with no additional commentary, explanations, or formatting:
 
 QUERY TYPE:
-[Selected category from available query types or NONE]
+[ONLY ONE selected category from AVAILABLE QUERY TYPES or NONE]
 
 SPECIFIC ISSUE TYPE:
-[Selected category from available query types or NONE]
+[ONLY ONE selected category from AVAILABLE SPECIFIC ISSUE TYPES or NONE]
 """
-    prompt = prompt_template.format(query_type_choices=query_type_choices, 
-                                    specific_issue_choices=specific_issue_choices,
-                                    context=context,
-                                    problem=problem
-                                )
-    
+
+    prompt_template_no_context = """
+You are a customer support representative for Tindahang Tapat, a digital platform that enables sari-sari stores to order groceries via mobile phone.
+
+## OBJECTIVE
+Classify the customer's problem into the appropriate query type and specific issue category.
+
+## CLASSIFICATION FRAMEWORK
+
+### AVAILABLE QUERY TYPES
+```
+{query_type_choices}
+```
+
+### AVAILABLE SPECIFIC ISSUE TYPES
+```
+{specific_issue_choices}
+```
+
+## CLASSIFICATION GUIDELINES
+- Select the **most specific** category that matches the problem
+- Choose only **one** QUERY TYPE and **one** SPECIFIC ISSUE TYPE
+- If uncertain between categories, prioritize the one that best captures the core functionality issue
+- Output **NONE** if no category adequately fits the problem
+
+
+## CUSTOMER PROBLEM
+```
+{problem}
+```
+
+## OUTPUT REQUIREMENTS
+- Provide **ONLY** the classifications below
+- STRICTLY no additional text, explanations, or formatting
+- Use **NONE** if no suitable category exists
+
+## OUTPUT FORMAT
+Provide exactly two sections with no additional commentary, explanations, or formatting:
+
+QUERY TYPE:
+[ONLY ONE selected category from AVAILABLE QUERY TYPES or NONE]
+
+SPECIFIC ISSUE TYPE:
+[ONLY ONE selected category from AVAILABLE SPECIFIC ISSUE TYPES or NONE]
+"""
+
+    if use_context is True:
+        prompt = prompt_template.format(query_type_choices=query_type_choices, 
+                                        specific_issue_choices=specific_issue_choices,
+                                        context=context,
+                                        problem=problem
+                                    )
+    else:
+        prompt = prompt_template_no_context.format(query_type_choices=query_type_choices, 
+                                        specific_issue_choices=specific_issue_choices,
+                                        problem=problem
+                                    )
+
     return prompt
 
-def answer_ticket_prompt(problem: str, context: str) -> str:
+def answer_ticket_prompt(problem: str, context: str, use_context: bool = True) -> str:
     prompt_template = """
 ## ROLE & CONTEXT
 You are a customer support representative for Tindahang Tapat, a digital platform enabling sari-sari stores to order groceries via mobile phone. Generate appropriate responses using only the provided knowledge base context.
@@ -385,36 +454,99 @@ ANSWER
 PRIORITY  
 [Single priority level: Low, Medium, High, or Urgent]
 """
-    prompt = prompt_template.format(context=context, problem=problem)
+
+    prompt_template_no_context = """
+## ROLE & CONTEXT
+You are a customer support representative for Tindahang Tapat, a digital platform enabling sari-sari stores to order groceries via mobile phone. Generate appropriate responses using only the provided knowledge base context.
+
+## PRIMARY OBJECTIVE
+Deliver accurate, helpful solutions to customer problems, maintaining professional service standards.
+
+## RESPONSE METHODOLOGY
+
+### Content Requirements
+- **Solution focus**: Prioritize actionable steps and clear guidance
+- **Completeness**: Address all aspects of the customer's problem
+
+### Communication Standards
+- **Professional tone**: Courteous, confident, and solution-oriented
+- **Filipino market awareness**: Use terminology familiar to sari-sari store owners
+- **Clarity**: Avoid technical jargon; use simple, direct language
+- **Brevity**: Concise responses (2-4 sentences) that fully address the issue
+
+### Customer Problem
+```
+{problem}
+```
+
+## RESPONSE GENERATION RULES
+
+### Content Validation
+1. **Completeness check**: Verify all problem aspects are addressed
+2. **Tone check**: Maintain professional, helpful customer service voice
+
+### Quality Standards
+- **Actionable**: Include specific steps
+- **Comprehensive**: Address root cause in sufficient detail
+- **Preventive**: Mention prevention tips
+- **Follow-up ready**: Set clear expectations for next steps if needed
+
+## OUTPUT REQUIREMENTS
+Provide exactly two sections with no additional commentary, explanations, or formatting:
+
+ANSWER
+[Complete customer response - 2-4 sentences addressing their problem with specific, actionable guidance]
+
+PRIORITY  
+[Single priority level: Low, Medium, High, or Urgent]
+"""
+
+    if use_context is True:
+        prompt = prompt_template.format(context=context, problem=problem)
+    else:
+        prompt = prompt_template_no_context.format(problem=problem)
     
     return prompt
 
 def llm_response(prompt: str, temperature: int = 1) -> str:
-    # response = gemini_client.models.generate_content(
-    #         model='gemini-2.0-flash',
-    #         contents=prompt
-    #     )
-    # answer = response.candidates[0].content.parts[0].text
-    
-    response = groq_client.chat.completions.create(
-        model="meta-llama/llama-4-maverick-17b-128e-instruct",
-        messages=[
-        {
-            "role": "user",
-            "content": prompt,
-        }
-        ],
-        temperature=temperature,
-        max_completion_tokens=1024,
-        top_p=1,
-        stream=True,
-        stop=None,
-    )
 
-    answer = ""
-    for chunk in response:
-        content = chunk.choices[0].delta.content or ""
-        answer += content
+    response = gemini_client.models.generate_content(
+        model='gemini-2.0-flash',
+        contents=prompt,
+    )
+    answer = response.candidates[0].content.parts[0].text
+    
+    # response = groq_client.chat.completions.create(
+    #     model="meta-llama/llama-4-maverick-17b-128e-instruct",
+    #     messages=[
+    #     {
+    #         "role": "user",
+    #         "content": prompt,
+    #     }
+    #     ],
+    #     temperature=temperature,
+    #     max_completion_tokens=1024,
+    #     top_p=1,
+    #     stream=True,
+    #     stop=None,
+    # )
+
+    # answer = ""
+    # for chunk in response:
+    #     content = chunk.choices[0].delta.content or ""
+    #     answer += content
+
+    # response = ollama.generate(
+    #     model="mistral", 
+    #     prompt=prompt, 
+    #     options={
+    #         "temperature": temperature,
+    #         # "top_p": 0.9,
+    #         # "stop": ["\n"],
+    #         # "num_predict": 100
+    #     }
+    # )
+    # answer = response.response.strip()
 
     return answer
 
@@ -513,7 +645,7 @@ def get_payload_to_json(request):
     tickets_payload = []
 
     print('Fetching tickets')
-    for ticket_id in range(367, 501):
+    for ticket_id in range(523, 526):
         print(ticket_id)
         description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
         response = requests.get(description_url, headers=headers, auth=auth)
@@ -696,6 +828,7 @@ Extract the **primary functional problem** that prompted the customer to contact
 - If multiple problems exist, focus on the most critical one
 
 ## EXPECTED OUTPUT FORMAT
+Provide ONLY the section below. No explanations, commentary, or additional text.
 [Standardized problem statement with ALL products normalized as "items"]
 """
     prompt = prompt_template.format(conversation=full_text_conversation)

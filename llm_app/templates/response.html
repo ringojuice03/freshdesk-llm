@@ -9,6 +9,7 @@
   <h1>Latest 5 Freshdesk Tickets</h1>
   {% for ticket in tickets %}
   <div style="border: 1px solid #ccc; margin-bottom: 20px; padding: 10px">
+    <h1>Ticket Details</h1>
     <h2>Ticket ID: {{ ticket.id }}</h2>
     <h2>Ticket Holder: {{ ticket.name }}</h2>
     {% if ticket.payload %}
@@ -37,16 +38,37 @@
 
       {% endfor %}
     </ul>
-    <h3>Summarized Problem:</h3>
-    <p>{{ ticket.payload.problem }}</p>
-    <h3>Generated query type:</h3>
-    <p>{{ ticket.query_type }}</p>
-    <h3>Generated specific issue type:</h3>
-    <p>{{ ticket.specific_issue_type }}</p>
-    <h3>Generated priority level:</h3>
-    <p>{{ ticket.priority }}</p>
-    <h3>Generated Response:</h3>
-    <p>{{ ticket.generated_response }}</p>
+
+    <hr>
+
+      <h2>Prompt</h2>
+      <h3>Summarized Problem:</h3>
+      <p>{{ ticket.payload.problem }}</p>
+
+    <hr>
+
+      <h2>Non-RAG</h2>
+      <h3>Query type:</h3>
+      <p>{{ ticket.query_type }}</p>
+      <h3>Specific issue type:</h3>
+      <p>{{ ticket.specific_issue_type }}</p>
+      <h3>Priority level:</h3>
+      <p>{{ ticket.priority }}</p>
+      <h3>Response:</h3>
+      <p>{{ ticket.generated_response }}</p>
+
+    <hr>
+
+      <h2>RAG</h2>
+      <h3>Query type:</h3>
+      <p>{{ ticket.query_type_no_context }}</p>
+      <h3>Specific issue type:</h3>
+      <p>{{ ticket.specific_issue_type_no_context }}</p>
+      <h3>Priority level:</h3>
+      <p>{{ ticket.priority_no_context }}</p>
+      <h3>Response:</h3>
+      <p>{{ ticket.answer_no_context }}</p>
+
   </div>
   {% empty %}
   <p>No tickets found.</p>
