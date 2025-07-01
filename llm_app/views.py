@@ -12,6 +12,7 @@ groq_api_key = os.environ.get('GROQ_API_KEY')
 groq_client = Groq(api_key=groq_api_key)
 
 from google import genai
+from google.genai import types
 gemini_api_key = os.environ.get('GEMINI_API_KEY')
 gemini_client = genai.Client(api_key=gemini_api_key)
 
@@ -22,20 +23,25 @@ from qdrant_client import models, QdrantClient
 qd_client = QdrantClient('http://localhost:6333')
 collection_name = 'freshdesk-tickets-rag'
 
-def extract_query_and_issue_types():
-    with open('fields.json', "r", encoding="utf-8") as f:
-        fields = json.load(f)
-    qt_choices = fields['query_type_choices']
-    si_choices = fields['specific_issue_choices']
-    query_type_choices = ""
-    for choice in qt_choices:
-        query_type_choices = query_type_choices + choice + "\n"
-    specific_issue_choices = ""
-    for choice in si_choices:
-        specific_issue_choices = specific_issue_choices + choice + "\n"
-    return query_type_choices,specific_issue_choices
 
-query_type_choices, specific_issue_choices = extract_query_and_issue_types()
+with open('fields.json', "r", encoding="utf-8") as f:
+    fields = json.load(f)
+
+qt_choices = fields['query_type_choices']
+si_choices = fields['specific_issue_choices']
+
+query_type_choices = ""
+specific_issue_choices = ""
+query_type_list = []
+specific_issue_list = []
+
+for choice in qt_choices:
+    query_type_choices = query_type_choices + choice + "\n"
+    query_type_list.append(choice)
+for choice in si_choices:
+    specific_issue_choices = specific_issue_choices + choice + "\n"
+    specific_issue_list.append(choice)
+
 
 headers = {
     'Content-Type': 'application/json'
@@ -62,54 +68,41 @@ STATUS_MAP = {
 }
 
 def hello_world(request):
-    fixed_tickets = []
-
-    file_path = "documents.json"
-    if os.path.exists(file_path):
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    else:
-        data = []
-
-    for doc in data:
-        if doc['problem'] == None or doc['resolution'] == None:
-            print(doc['id'])
-            description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{doc['id']}"
-            response = requests.get(description_url, headers=headers, auth=auth)
-        
-            if response.status_code == 200:
-                ticket_description = response.json()
-            else:
-                print(f"Ticket ID {doc['id']} not found (Status: {response.status_code}). Skipping...")
-                continue
-
-            doc = get_payload(ticket_description)
-
-            parsed_conversations = get_all_conversations(doc['id'], domain, headers, auth, ticket_description)
-            full_text_conversation = parsed_conversations['full_text_conversation']
-
-            problem, resolution = get_problem_and_resolution(full_text_conversation)
-            doc['problem'] = problem
-            doc['resolution'] = resolution
-
-            print('-----')
-
-        fixed_tickets.append(doc)
+    for ticket_id in range(22296, 22297):
+        print(ticket_id)
+        description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
+        response = requests.get(description_url, headers=headers, auth=auth)
     
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(fixed_tickets, f, ensure_ascii=False, indent=4)
+        if response.status_code == 200:
+            ticket_description = response.json()
+        else:
+            print(f"Ticket ID {ticket_id} not found (Status: {response.status_code}). Skipping...")
+            continue
 
-    print('Tickets okay')
+        doc = get_payload(ticket_description)
+
+        parsed_conversations = get_all_conversations(ticket_id, domain, headers, auth, ticket_description)
+        full_text_conversation = parsed_conversations['full_text_conversation']
+
+        problem, resolution = get_problem_and_resolution(full_text_conversation)
+        doc['problem'] = problem
+        doc['resolution'] = resolution
+
+        print(full_text_conversation)
+        print('-----')
+
+    
     return render(request, 'hello.html')
 
 def latest_tickets(request):
-    tickets_url = f"https://{domain}.freshdesk.com/api/v2/tickets?order_by=created_at&order_type=desc&per_page=3"
+    tickets_url = f"https://{domain}.freshdesk.com/api/v2/tickets?order_by=created_at&order_type=desc&per_page=2"
     ticket_response = requests.get(tickets_url, headers=headers, auth=auth)
     tickets = ticket_response.json() if ticket_response.status_code == 200 else []
 
     ticket_list = []
 
     # for ticket in range(0, 1):
+    #     ticket_id = 22384
     for ticket in tickets:
         ticket_id = ticket.get('id')
         description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
@@ -125,6 +118,8 @@ def latest_tickets(request):
 
         parsed_conversations = get_all_conversations(ticket_id, domain, headers, auth, ticket_description)
         full_text_conversation = parsed_conversations['full_text_conversation']
+
+        full_text_conversation = translate_conversation(full_text_conversation)
 
         problem = get_problem(full_text_conversation)
         payload['problem'] = problem
@@ -176,26 +171,31 @@ def latest_tickets(request):
 def rag_classification(problem: str, use_context: bool = True) -> str:
     search_response = rrf_search(problem)
     prompt = classification_prompt(problem, search_response, use_context)
-    response = llm_response(prompt)
 
-    query_type = None
-    specific_issue_type = None
+    query_type = ""
+    specific_issue_type = ""
 
-    while query_type is None or specific_issue_type is None:
+    while query_type not in query_type_list or specific_issue_type not in specific_issue_choices:
+        response = llm_response(prompt)
         query_type, specific_issue_type = split_query_and_issue_type(response)
+
+        query_type = str(query_type)
+        specific_issue_type = str(specific_issue_type)
 
     return query_type, specific_issue_type
 
 def rag(problem: str, query_type: str, use_context: bool = True) -> str:
     search_response = rrf_filter_search(problem, query_type)
     prompt = answer_ticket_prompt(problem, search_response, use_context)
-    response = llm_response(prompt)
 
-    answer = None
-    priority = None
+    priority = ""
     
-    while answer is None or priority is None: 
+    while priority not in ["Low", "Medium", "High", "Urgent"]:
+        response = llm_response(prompt)
         answer, priority = split_answer_and_priority(response)
+
+        if priority is None:
+            priority = ""
 
     return answer, priority
 
@@ -490,6 +490,7 @@ Deliver accurate, helpful solutions to customer problems, maintaining profession
 - **Comprehensive**: Address root cause in sufficient detail
 - **Preventive**: Mention prevention tips
 - **Follow-up ready**: Set clear expectations for next steps if needed
+- ANSWER should be in English
 
 ## OUTPUT REQUIREMENTS
 Provide exactly two sections with no additional commentary, explanations, or formatting:
@@ -513,6 +514,10 @@ def llm_response(prompt: str, temperature: int = 1) -> str:
     response = gemini_client.models.generate_content(
         model='gemini-2.0-flash',
         contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=temperature,
+            maxOutputTokens=1024
+        )
     )
     answer = response.candidates[0].content.parts[0].text
     
@@ -557,20 +562,20 @@ def embed_tickets(request):
 
     print('Initializing qdrant client')
     
-    qd_client.create_collection(
-        collection_name=collection_name,
-        vectors_config={
-            "baai-large": models.VectorParams(
-                size = 1024,
-                distance = models.Distance.COSINE
-            )
-        },
-        sparse_vectors_config={
-            "bm25": models.SparseVectorParams(
-                modifier = models.Modifier.IDF
-            )
-        },
-    )
+    # qd_client.create_collection(
+    #     collection_name=collection_name,
+    #     vectors_config={
+    #         "baai-large": models.VectorParams(
+    #             size = 1024,
+    #             distance = models.Distance.COSINE
+    #         )
+    #     },
+    #     sparse_vectors_config={
+    #         "bm25": models.SparseVectorParams(
+    #             modifier = models.Modifier.IDF
+    #         )
+    #     },
+    # )
 
     print('Uploading data points...')
     qd_client.upsert(
@@ -1031,3 +1036,28 @@ def parse_freshdesk_conversations(conversations, ticket_description) -> dict:
         'agent_conversation': agent_conversation,
         'ordered_conversation_details': ordered_conversation_details,
     }
+
+def translate_conversation(conversation: str) -> str:
+    prompt_template = """
+INSTRUCTIONS:
+You are a professional translator. Translate the following CONVERSATION from languages (English, Tagalog, Bikol, or a mix) into clear, natural English.
+
+REQUIREMENTS:
+- Preserve all "Customer:" and "Agent:" labels exactly as they appear
+- Maintain the original meaning, tone, and context of each message
+- Use natural, conversational English that sounds authentic
+- Keep the same dialogue structure and flow
+- Do not add explanations, summaries, or commentary
+- If text is already in English, keep it unchanged unless it needs clarity improvements
+
+CONVERSATION:
+{conversation}
+
+OUTPUT:
+"""
+    prompt = prompt_template.format(conversation=conversation)
+    translated_conversation = llm_response(prompt)
+
+    print(f'Translated: {translated_conversation}')
+
+    return translated_conversation
