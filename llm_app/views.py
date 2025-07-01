@@ -8,32 +8,40 @@ from django.http import HttpResponse
 import json
 
 from groq import Groq
-# groq_api_key = os.environ.get('GROQ_API_KEY')
-groq_api_key = "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"
+groq_api_key = os.environ.get('GROQ_API_KEY')
 groq_client = Groq(api_key=groq_api_key)
 
 from google import genai
+from google.genai import types
 gemini_api_key = os.environ.get('GEMINI_API_KEY')
 gemini_client = genai.Client(api_key=gemini_api_key)
+
+import ollama
+ollama.pull("mistral")
 
 from qdrant_client import models, QdrantClient
 qd_client = QdrantClient('http://localhost:6333')
 collection_name = 'freshdesk-tickets-rag'
 
-def extract_query_and_issue_types():
-    with open('fields.json', "r", encoding="utf-8") as f:
-        fields = json.load(f)
-    qt_choices = fields['query_type_choices']
-    si_choices = fields['specific_issue_choices']
-    query_type_choices = ""
-    for choice in qt_choices:
-        query_type_choices = query_type_choices + choice + "\n"
-    specific_issue_choices = ""
-    for choice in si_choices:
-        specific_issue_choices = specific_issue_choices + choice + "\n"
-    return query_type_choices,specific_issue_choices
 
-query_type_choices, specific_issue_choices = extract_query_and_issue_types()
+with open('fields.json', "r", encoding="utf-8") as f:
+    fields = json.load(f)
+
+qt_choices = fields['query_type_choices']
+si_choices = fields['specific_issue_choices']
+
+query_type_choices = ""
+specific_issue_choices = ""
+query_type_list = []
+specific_issue_list = []
+
+for choice in qt_choices:
+    query_type_choices = query_type_choices + choice + "\n"
+    query_type_list.append(choice)
+for choice in si_choices:
+    specific_issue_choices = specific_issue_choices + choice + "\n"
+    specific_issue_list.append(choice)
+
 
 headers = {
     'Content-Type': 'application/json'
@@ -60,56 +68,41 @@ STATUS_MAP = {
 }
 
 def hello_world(request):
-    fixed_tickets = []
-
-    file_path = "documents.json"
-    if os.path.exists(file_path):
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    else:
-        data = []
-
-    for doc in data:
-        if doc['problem'] == None or doc['resolution'] == None:
-            print(doc['id'])
-            description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{doc['id']}"
-            response = requests.get(description_url, headers=headers, auth=auth)
-        
-            if response.status_code == 200:
-                ticket_description = response.json()
-            else:
-                print(f"Ticket ID {doc['id']} not found (Status: {response.status_code}). Skipping...")
-                continue
-
-            doc = get_payload(ticket_description)
-
-            raw_conversations = get_all_conversations(doc['id'], domain, headers, auth)
-            parsed_conversations = parse_freshdesk_conversations(raw_conversations, ticket_description)
-            full_text_conversation = parsed_conversations['full_text_conversation']
-
-            problem_and_resolution = get_problem_and_resolution(full_text_conversation)
-            problem, resolution = split_problem_and_resolution(problem_and_resolution)
-            doc['problem'] = problem
-            doc['resolution'] = resolution
-
-            print(problem_and_resolution)
-            print('-----')
-
-        fixed_tickets.append(doc)
+    for ticket_id in range(22296, 22297):
+        print(ticket_id)
+        description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
+        response = requests.get(description_url, headers=headers, auth=auth)
     
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(fixed_tickets, f, ensure_ascii=False, indent=4)
+        if response.status_code == 200:
+            ticket_description = response.json()
+        else:
+            print(f"Ticket ID {ticket_id} not found (Status: {response.status_code}). Skipping...")
+            continue
 
-    print('Tickets okay')
+        doc = get_payload(ticket_description)
+
+        parsed_conversations = get_all_conversations(ticket_id, domain, headers, auth, ticket_description)
+        full_text_conversation = parsed_conversations['full_text_conversation']
+
+        problem, resolution = get_problem_and_resolution(full_text_conversation)
+        doc['problem'] = problem
+        doc['resolution'] = resolution
+
+        print(full_text_conversation)
+        print('-----')
+
+    
     return render(request, 'hello.html')
 
 def latest_tickets(request):
-    tickets_url = f"https://{domain}.freshdesk.com/api/v2/tickets?order_by=created_at&order_type=desc&per_page=5"
+    tickets_url = f"https://{domain}.freshdesk.com/api/v2/tickets?order_by=created_at&order_type=desc&per_page=2"
     ticket_response = requests.get(tickets_url, headers=headers, auth=auth)
     tickets = ticket_response.json() if ticket_response.status_code == 200 else []
+
     ticket_list = []
 
     # for ticket in range(0, 1):
+    #     ticket_id = 22384
     for ticket in tickets:
         ticket_id = ticket.get('id')
         description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
@@ -123,9 +116,10 @@ def latest_tickets(request):
 
         payload = get_payload(ticket_description)
 
-        raw_conversations = get_all_conversations(ticket_id, domain, headers, auth)
-        parsed_conversations = parse_freshdesk_conversations(raw_conversations, ticket_description)
+        parsed_conversations = get_all_conversations(ticket_id, domain, headers, auth, ticket_description)
         full_text_conversation = parsed_conversations['full_text_conversation']
+
+        full_text_conversation = translate_conversation(full_text_conversation)
 
         problem = get_problem(full_text_conversation)
         payload['problem'] = problem
@@ -140,9 +134,12 @@ def latest_tickets(request):
 
         answer = "Only respond when the customer messaged last."
         if is_customer_last_msg:
-            classification_details = rag_classification(problem)
-            query_type, specific_issue_type = split_query_and_issue_type(classification_details)
+            query_type, specific_issue_type = rag_classification(problem)
+            query_type_no_context, specific_issue_type_no_context = rag_classification(problem, use_context = False)
+            
             answer, priority = rag(problem, query_type)
+            answer_no_context, priority_no_context = rag(problem, query_type, use_context = False)
+
             print(f'Query type: {query_type}')
             print(f'Specific issue type: {specific_issue_type}')
             print(f'Priority: {priority}')
@@ -152,30 +149,53 @@ def latest_tickets(request):
             'id': ticket_id,
             'name': contact_name,
             'conversation': parsed_conversations['ordered_conversation_details'],
-            'generated_response': answer,
             'payload': payload,
+
+            # rag
             'query_type': query_type,
             'specific_issue_type': specific_issue_type,
+            'generated_response': answer,
             'priority': priority,
+
+            # non-rag
+            'query_type_no_context': query_type_no_context, 
+            'specific_issue_type_no_context': specific_issue_type_no_context,
+            'answer_no_context': answer_no_context,
+            'priority_no_context': priority_no_context,
         })
         
         print('----------')
 
     return render(request, 'response.html', {'tickets': ticket_list,})
 
-def rag_classification(problem: str) -> str:
+def rag_classification(problem: str, use_context: bool = True) -> str:
     search_response = rrf_search(problem)
-    prompt = classification_prompt(problem, search_response)
-    response = llm_response(prompt)
+    prompt = classification_prompt(problem, search_response, use_context)
 
-    return response
+    query_type = ""
+    specific_issue_type = ""
 
-def rag(problem: str, query_type: str) -> str:
+    while query_type not in query_type_list or specific_issue_type not in specific_issue_choices:
+        response = llm_response(prompt)
+        query_type, specific_issue_type = split_query_and_issue_type(response)
+
+        query_type = str(query_type)
+        specific_issue_type = str(specific_issue_type)
+
+    return query_type, specific_issue_type
+
+def rag(problem: str, query_type: str, use_context: bool = True) -> str:
     search_response = rrf_filter_search(problem, query_type)
-    prompt = answer_ticket_prompt(problem, search_response)
-    response = llm_response(prompt)
+    prompt = answer_ticket_prompt(problem, search_response, use_context)
 
-    answer, priority = split_answer_and_priority(response)
+    priority = ""
+    
+    while priority not in ["Low", "Medium", "High", "Urgent"]:
+        response = llm_response(prompt)
+        answer, priority = split_answer_and_priority(response)
+
+        if priority is None:
+            priority = ""
 
     return answer, priority
 
@@ -264,7 +284,7 @@ def rrf_filter_search(problem: str, query_type: str, limit: int = 5) -> str:
 
     return context
 
-def classification_prompt(problem: str, context: str) -> str:
+def classification_prompt(problem: str, context: str, use_context: bool = True) -> str:
     prompt_template = """
 You are a customer support representative for Tindahang Tapat, a digital platform that enables sari-sari stores to order groceries via mobile phone.
 
@@ -273,12 +293,12 @@ Classify the customer's problem into the appropriate query type and specific iss
 
 ## CLASSIFICATION FRAMEWORK
 
-### Available Query Types
+### AVAILABLE QUERY TYPES
 ```
 {query_type_choices}
 ```
 
-### Available Specific Issue Types
+### AVAILABLE SPECIFIC ISSUE TYPES
 ```
 {specific_issue_choices}
 ```
@@ -286,7 +306,7 @@ Classify the customer's problem into the appropriate query type and specific iss
 ## CLASSIFICATION GUIDELINES
 - Use the **CONTEXT** as your primary reference for accurate classification
 - Select the **most specific** category that matches the problem
-- Choose only **one** query type and **one** specific issue type
+- Choose only **one** QUERY TYPE and **one** SPECIFIC ISSUE TYPE
 - If uncertain between categories, prioritize the one that best captures the core functionality issue
 - Output **NONE** if no category adequately fits the problem
 
@@ -306,22 +326,75 @@ Classify the customer's problem into the appropriate query type and specific iss
 - Use **NONE** if no suitable category exists
 
 ## OUTPUT FORMAT
+Provide exactly two sections with no additional commentary, explanations, or formatting:
 
 QUERY TYPE:
-[Selected category from available query types or NONE]
+[ONLY ONE selected category from AVAILABLE QUERY TYPES or NONE]
 
 SPECIFIC ISSUE TYPE:
-[Selected category from available query types or NONE]
+[ONLY ONE selected category from AVAILABLE SPECIFIC ISSUE TYPES or NONE]
 """
-    prompt = prompt_template.format(query_type_choices=query_type_choices, 
-                                    specific_issue_choices=specific_issue_choices,
-                                    context=context,
-                                    problem=problem
-                                )
-    
+
+    prompt_template_no_context = """
+You are a customer support representative for Tindahang Tapat, a digital platform that enables sari-sari stores to order groceries via mobile phone.
+
+## OBJECTIVE
+Classify the customer's problem into the appropriate query type and specific issue category.
+
+## CLASSIFICATION FRAMEWORK
+
+### AVAILABLE QUERY TYPES
+```
+{query_type_choices}
+```
+
+### AVAILABLE SPECIFIC ISSUE TYPES
+```
+{specific_issue_choices}
+```
+
+## CLASSIFICATION GUIDELINES
+- Select the **most specific** category that matches the problem
+- Choose only **one** QUERY TYPE and **one** SPECIFIC ISSUE TYPE
+- If uncertain between categories, prioritize the one that best captures the core functionality issue
+- Output **NONE** if no category adequately fits the problem
+
+
+## CUSTOMER PROBLEM
+```
+{problem}
+```
+
+## OUTPUT REQUIREMENTS
+- Provide **ONLY** the classifications below
+- STRICTLY no additional text, explanations, or formatting
+- Use **NONE** if no suitable category exists
+
+## OUTPUT FORMAT
+Provide exactly two sections with no additional commentary, explanations, or formatting:
+
+QUERY TYPE:
+[ONLY ONE selected category from AVAILABLE QUERY TYPES or NONE]
+
+SPECIFIC ISSUE TYPE:
+[ONLY ONE selected category from AVAILABLE SPECIFIC ISSUE TYPES or NONE]
+"""
+
+    if use_context is True:
+        prompt = prompt_template.format(query_type_choices=query_type_choices, 
+                                        specific_issue_choices=specific_issue_choices,
+                                        context=context,
+                                        problem=problem
+                                    )
+    else:
+        prompt = prompt_template_no_context.format(query_type_choices=query_type_choices, 
+                                        specific_issue_choices=specific_issue_choices,
+                                        problem=problem
+                                    )
+
     return prompt
 
-def answer_ticket_prompt(problem: str, context: str) -> str:
+def answer_ticket_prompt(problem: str, context: str, use_context: bool = True) -> str:
     prompt_template = """
 ## ROLE & CONTEXT
 You are a customer support representative for Tindahang Tapat, a digital platform enabling sari-sari stores to order groceries via mobile phone. Generate appropriate responses using only the provided knowledge base context.
@@ -381,36 +454,104 @@ ANSWER
 PRIORITY  
 [Single priority level: Low, Medium, High, or Urgent]
 """
-    prompt = prompt_template.format(context=context, problem=problem)
+
+    prompt_template_no_context = """
+## ROLE & CONTEXT
+You are a customer support representative for Tindahang Tapat, a digital platform enabling sari-sari stores to order groceries via mobile phone. Generate appropriate responses using only the provided knowledge base context.
+
+## PRIMARY OBJECTIVE
+Deliver accurate, helpful solutions to customer problems, maintaining professional service standards.
+
+## RESPONSE METHODOLOGY
+
+### Content Requirements
+- **Solution focus**: Prioritize actionable steps and clear guidance
+- **Completeness**: Address all aspects of the customer's problem
+
+### Communication Standards
+- **Professional tone**: Courteous, confident, and solution-oriented
+- **Filipino market awareness**: Use terminology familiar to sari-sari store owners
+- **Clarity**: Avoid technical jargon; use simple, direct language
+- **Brevity**: Concise responses (2-4 sentences) that fully address the issue
+
+### Customer Problem
+```
+{problem}
+```
+
+## RESPONSE GENERATION RULES
+
+### Content Validation
+1. **Completeness check**: Verify all problem aspects are addressed
+2. **Tone check**: Maintain professional, helpful customer service voice
+
+### Quality Standards
+- **Actionable**: Include specific steps
+- **Comprehensive**: Address root cause in sufficient detail
+- **Preventive**: Mention prevention tips
+- **Follow-up ready**: Set clear expectations for next steps if needed
+- ANSWER should be in English
+
+## OUTPUT REQUIREMENTS
+Provide exactly two sections with no additional commentary, explanations, or formatting:
+
+ANSWER
+[Complete customer response - 2-4 sentences addressing their problem with specific, actionable guidance]
+
+PRIORITY  
+[Single priority level: Low, Medium, High, or Urgent]
+"""
+
+    if use_context is True:
+        prompt = prompt_template.format(context=context, problem=problem)
+    else:
+        prompt = prompt_template_no_context.format(problem=problem)
     
     return prompt
 
 def llm_response(prompt: str, temperature: int = 1) -> str:
-    # response = gemini_client.models.generate_content(
-    #         model='gemini-2.0-flash',
-    #         contents=prompt
-    #     )
-    # answer = response.candidates[0].content.parts[0].text
-    
-    response = groq_client.chat.completions.create(
-        model="meta-llama/llama-4-maverick-17b-128e-instruct",
-        messages=[
-        {
-            "role": "user",
-            "content": prompt,
-        }
-        ],
-        temperature=temperature,
-        max_completion_tokens=1024,
-        top_p=1,
-        stream=True,
-        stop=None,
-    )
 
-    answer = ""
-    for chunk in response:
-        content = chunk.choices[0].delta.content or ""
-        answer += content
+    response = gemini_client.models.generate_content(
+        model='gemini-2.0-flash',
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=temperature,
+            maxOutputTokens=1024
+        )
+    )
+    answer = response.candidates[0].content.parts[0].text
+    
+    # response = groq_client.chat.completions.create(
+    #     model="meta-llama/llama-4-maverick-17b-128e-instruct",
+    #     messages=[
+    #     {
+    #         "role": "user",
+    #         "content": prompt,
+    #     }
+    #     ],
+    #     temperature=temperature,
+    #     max_completion_tokens=1024,
+    #     top_p=1,
+    #     stream=True,
+    #     stop=None,
+    # )
+
+    # answer = ""
+    # for chunk in response:
+    #     content = chunk.choices[0].delta.content or ""
+    #     answer += content
+
+    # response = ollama.generate(
+    #     model="mistral", 
+    #     prompt=prompt, 
+    #     options={
+    #         "temperature": temperature,
+    #         # "top_p": 0.9,
+    #         # "stop": ["\n"],
+    #         # "num_predict": 100
+    #     }
+    # )
+    # answer = response.response.strip()
 
     return answer
 
@@ -487,7 +628,7 @@ def embed_tickets(request):
     print('Done')    
     return render(request, 'embed.html')
 
-def get_payload(ticket_description):
+def get_payload(ticket_description) -> dict:
     priority_integer = ticket_description.get('priority')
     priority = PRIORITY_MAP.get(priority_integer, "Unknown")
 
@@ -509,7 +650,7 @@ def get_payload_to_json(request):
     tickets_payload = []
 
     print('Fetching tickets')
-    for ticket_id in range(201, 501):
+    for ticket_id in range(523, 526):
         print(ticket_id)
         description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
         response = requests.get(description_url, headers=headers, auth=auth)
@@ -526,16 +667,19 @@ def get_payload_to_json(request):
         if payload['query_type'] == None: continue 
         if payload['specific_issue'] == None: continue
 
-        raw_conversations = get_all_conversations(ticket_id, domain, headers, auth)
-        parsed_conversations = parse_freshdesk_conversations(raw_conversations, ticket_description)
+        parsed_conversations = get_all_conversations(ticket_id, domain, headers, auth, ticket_description)
         full_text_conversation = parsed_conversations['full_text_conversation']
 
-        problem_and_resolution = get_problem_and_resolution(full_text_conversation)
-        problem, resolution = split_problem_and_resolution(problem_and_resolution)
+        problem = None
+        resolution = None
+
+        while problem is None or resolution is None:
+            problem, resolution = get_problem_and_resolution(full_text_conversation)
+
         payload['problem'] = problem
         payload['resolution'] = resolution
 
-        print(problem_and_resolution)
+        print(f'Problem: {problem}\n\nResolution: {resolution}')
         print('-----')
 
         tickets_payload.append(payload) 
@@ -555,7 +699,7 @@ def get_payload_to_json(request):
 
     return render(request, 'json.html')
 
-def split_problem_and_resolution(text):
+def split_problem_and_resolution(text) -> tuple[str, str]:
     pattern = r"""
         [#\*\s]*CORE\s+PROBLEM\s+STATEMENT[:\s\#\*]*
         (.*?)                                  
@@ -571,7 +715,7 @@ def split_problem_and_resolution(text):
     else:
         return None, None
 
-def split_query_and_issue_type(text: str):
+def split_query_and_issue_type(text: str) -> tuple[str, str]:
     pattern = r"""
         [#\*\s]*QUERY\s+TYPE[:\s]*
         (.*?)                                  
@@ -587,7 +731,7 @@ def split_query_and_issue_type(text: str):
     else:
         return None, None
 
-def split_answer_and_priority(text: str):
+def split_answer_and_priority(text: str) -> tuple[str, str]:
     pattern = r"""
         [#\*\s]*ANSWER[:\s\*\#]*
         (.*?)                                  
@@ -603,7 +747,7 @@ def split_answer_and_priority(text: str):
     else:
         return None, None
 
-def get_problem(full_text_conversation):
+def get_problem(full_text_conversation) -> str:
     prompt_template = """
 ```
 ## CONTEXT
@@ -689,6 +833,7 @@ Extract the **primary functional problem** that prompted the customer to contact
 - If multiple problems exist, focus on the most critical one
 
 ## EXPECTED OUTPUT FORMAT
+Provide ONLY the section below. No explanations, commentary, or additional text.
 [Standardized problem statement with ALL products normalized as "items"]
 """
     prompt = prompt_template.format(conversation=full_text_conversation)
@@ -696,7 +841,7 @@ Extract the **primary functional problem** that prompted the customer to contact
 
     return answer
 
-def get_problem_and_resolution(full_text_conversation):
+def get_problem_and_resolution(full_text_conversation) -> tuple[str, str]:
     prompt_template = """
 ## CONTEXT
 You are analyzing customer support conversations for Tindahang Tapat, a digital platform enabling sari-sari stores to order groceries via mobile phone. Your task is to extract standardized problem-resolution pairs for a RAG knowledge base.
@@ -794,9 +939,15 @@ RESOLUTION:
 [Actionable solution steps and final status: RESOLVED or UNRESOLVED with next steps]
 """
     prompt = prompt_template.format(conversation=full_text_conversation)
-    answer = llm_response(prompt, temperature=0.4)
 
-    return answer
+    problem = None
+    resolution = None
+
+    while problem is None or resolution is None:
+        response = llm_response(prompt, temperature=0.4)
+        problem, resolution = split_problem_and_resolution(response)
+
+    return problem, resolution
 
 def get_contact(requestor_id, domain, headers, auth):
     contact_url = f"https://{domain}.freshdesk.com/api/v2/contacts/{requestor_id}"
@@ -805,9 +956,10 @@ def get_contact(requestor_id, domain, headers, auth):
 
     return contact
 
-def get_all_conversations(ticket_id, domain, headers, auth):
+def get_all_conversations(ticket_id, domain, headers, auth, ticket_description):
     conversations = []
     url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}/conversations"
+
     while url:
         response = requests.get(url, headers=headers, auth=auth)
         if response.status_code != 200:
@@ -823,9 +975,11 @@ def get_all_conversations(ticket_id, domain, headers, auth):
         else:
             url = None
 
-    return conversations
+    parsed_conversations = parse_freshdesk_conversations(conversations, ticket_description)
 
-def parse_freshdesk_conversations(conversations, ticket_description):
+    return parsed_conversations
+
+def parse_freshdesk_conversations(conversations, ticket_description) -> dict:
     sorted_conversations = sorted(conversations, key=lambda x: x['created_at'])
     
     full_text_conversation = ""
@@ -882,3 +1036,28 @@ def parse_freshdesk_conversations(conversations, ticket_description):
         'agent_conversation': agent_conversation,
         'ordered_conversation_details': ordered_conversation_details,
     }
+
+def translate_conversation(conversation: str) -> str:
+    prompt_template = """
+INSTRUCTIONS:
+You are a professional translator. Translate the following CONVERSATION from languages (English, Tagalog, Bikol, or a mix) into clear, natural English.
+
+REQUIREMENTS:
+- Preserve all "Customer:" and "Agent:" labels exactly as they appear
+- Maintain the original meaning, tone, and context of each message
+- Use natural, conversational English that sounds authentic
+- Keep the same dialogue structure and flow
+- Do not add explanations, summaries, or commentary
+- If text is already in English, keep it unchanged unless it needs clarity improvements
+
+CONVERSATION:
+{conversation}
+
+OUTPUT:
+"""
+    prompt = prompt_template.format(conversation=conversation)
+    translated_conversation = llm_response(prompt)
+
+    print(f'Translated: {translated_conversation}')
+
+    return translated_conversation
