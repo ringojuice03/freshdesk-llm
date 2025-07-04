@@ -16,6 +16,9 @@ from google.genai import types
 gemini_api_key = os.environ.get('GEMINI_API_KEY')
 gemini_client = genai.Client(api_key=gemini_api_key)
 
+openai_api_key = os.environ.get('OPENAI_API_KEY')
+
+
 import ollama
 ollama.pull("mistral")
 
@@ -81,7 +84,7 @@ def hello_world(request):
 
         doc = get_payload(ticket_description)
 
-        parsed_conversations = get_all_conversations(ticket_id, domain, headers, auth, ticket_description)
+        parsed_conversations = get_all_conversations(ticket_id, ticket_description)
         full_text_conversation = parsed_conversations['full_text_conversation']
 
         problem, resolution = get_problem_and_resolution(full_text_conversation)
@@ -95,7 +98,7 @@ def hello_world(request):
     return render(request, 'hello.html')
 
 def latest_tickets(request):
-    tickets_url = f"https://{domain}.freshdesk.com/api/v2/tickets?order_by=created_at&order_type=desc&per_page=2"
+    tickets_url = f"https://{domain}.freshdesk.com/api/v2/tickets?order_by=created_at&order_type=desc&per_page=3"
     ticket_response = requests.get(tickets_url, headers=headers, auth=auth)
     tickets = ticket_response.json() if ticket_response.status_code == 200 else []
 
@@ -116,13 +119,14 @@ def latest_tickets(request):
 
         payload = get_payload(ticket_description)
 
-        parsed_conversations = get_all_conversations(ticket_id, domain, headers, auth, ticket_description)
+        parsed_conversations = get_all_conversations(ticket_id, ticket_description)
         full_text_conversation = parsed_conversations['full_text_conversation']
 
-        full_text_conversation = translate_conversation(full_text_conversation)
+        # full_text_conversation = translate_conversation(full_text_conversation)
 
         problem = get_problem(full_text_conversation)
         payload['problem'] = problem
+
         print(f'Core Problem: {problem}')
 
         # to False later
@@ -135,16 +139,17 @@ def latest_tickets(request):
         answer = "Only respond when the customer messaged last."
         if is_customer_last_msg:
             query_type, specific_issue_type = rag_classification(problem)
-            query_type_no_context, specific_issue_type_no_context = rag_classification(problem, use_context = False)
-            
             answer, priority = rag(problem, query_type)
+
+            query_type_no_context, specific_issue_type_no_context = rag_classification(problem, use_context = False)
             answer_no_context, priority_no_context = rag(problem, query_type, use_context = False)
 
-            print(f'Query type: {query_type}')
-            print(f'Specific issue type: {specific_issue_type}')
-            print(f'Priority: {priority}')
-            print(f'Answer: {answer}')
-            
+        print(f'Query type: {query_type}')
+        print(f'Specific issue type: {specific_issue_type}')
+        print(f'Priority: {priority}')
+        print(f'Answer: {answer}')
+        print('**********')
+        
         ticket_list.append({
             'id': ticket_id,
             'name': contact_name,
@@ -169,32 +174,47 @@ def latest_tickets(request):
     return render(request, 'response.html', {'tickets': ticket_list,})
 
 def rag_classification(problem: str, use_context: bool = True) -> str:
+    print("RAG CLASSIFICATION")
+    print("Searching relevant documents...")
+
     search_response = rrf_search(problem)
     prompt = classification_prompt(problem, search_response, use_context)
+
+    print(f'Search results:\n{search_response}\n')
 
     query_type = ""
     specific_issue_type = ""
 
     while query_type not in query_type_list or specific_issue_type not in specific_issue_choices:
+        print("Generating CLASSIFICATION...")
         response = llm_response(prompt)
         query_type, specific_issue_type = split_query_and_issue_type(response)
 
+        print(f'{query_type} and {specific_issue_type}\n\n')
         query_type = str(query_type)
         specific_issue_type = str(specific_issue_type)
 
     return query_type, specific_issue_type
 
 def rag(problem: str, query_type: str, use_context: bool = True) -> str:
+    print("RAG for ANSWER")
+    print("Searching relevant documents...")
+
     search_response = rrf_filter_search(problem, query_type)
     prompt = answer_ticket_prompt(problem, search_response, use_context)
 
+    print(f'Search results:\n{search_response}\n')
+
     priority = ""
-    
-    while priority not in ["Low", "Medium", "High", "Urgent"]:
+    while priority not in ["Low", "Medium", "High", "Urgent", "NONE"]:
+        print("Generating ANSWER...")
         response = llm_response(prompt)
         answer, priority = split_answer_and_priority(response)
 
+        print(f'Answer: {answer}\n and \nPriority: {priority}\n')
+        print(f'Response: {response}')
         if priority is None:
+            print("Priority is none.")
             priority = ""
 
     return answer, priority
@@ -230,6 +250,9 @@ def rrf_search(problem: str, limit: int = 5) -> str:
         problem = result.payload['problem']
         resolution = result.payload['resolution'] 
         context += f'Problem: {problem}\nResolution: {resolution}\n---------------\n'
+
+    if context == "":
+        context = "No relevant data found."
 
     return context
 
@@ -282,6 +305,9 @@ def rrf_filter_search(problem: str, query_type: str, limit: int = 5) -> str:
         priority = result.payload['priority']
         context += f'Problem: {problem}\nResolution: {resolution}\nPriority: {priority}\n\n'
 
+    if context == "":
+        context = "No relevant data found."
+    
     return context
 
 def classification_prompt(problem: str, context: str, use_context: bool = True) -> str:
@@ -446,13 +472,13 @@ When context is insufficient, use exactly: *"I don't have specific information a
 - **Follow-up ready**: Set clear expectations for next steps if needed
 
 ## OUTPUT REQUIREMENTS
-Provide exactly two sections with no additional commentary, explanations, or formatting:
+With no additional commentary, explanations, or formatting, always return output in the following two sections:
 
-ANSWER
-[Complete customer response based on context - 2-4 sentences addressing their problem with specific, actionable guidance]
+ANSWER:  
+[Provide a complete customer response based on context - 2-4 sentences addressing their problem with specific, actionable guidance in Taglish. If the context does not include relevant information, use exactly: "ANSWER: I don't have specific information about this issue in my current resources. Please contact our support team at [support contact] for immediate assistance with your concern."]
 
-PRIORITY  
-[Single priority level: Low, Medium, High, or Urgent]
+PRIORITY:  
+[Provide one of the following values only: Low, Medium, High, Urgent, or NONE. If the fallback answer was used, return PRIORITY as NONE.]
 """
 
     prompt_template_no_context = """
@@ -493,13 +519,13 @@ Deliver accurate, helpful solutions to customer problems, maintaining profession
 - ANSWER should be in English
 
 ## OUTPUT REQUIREMENTS
-Provide exactly two sections with no additional commentary, explanations, or formatting:
+With no additional commentary, explanations, or formatting, always return output in the following two sections:
 
-ANSWER
-[Complete customer response - 2-4 sentences addressing their problem with specific, actionable guidance]
+ANSWER:  
+[Provide a complete customer response based on context - 2-4 sentences in TAGLISH addressing their problem with specific, actionable guidance in Taglish. If the context does not include relevant information, use exactly: "ANSWER: I don't have specific information about this issue in my current resources. Please contact our support team at [support contact] for immediate assistance with your concern."]
 
-PRIORITY  
-[Single priority level: Low, Medium, High, or Urgent]
+PRIORITY:  
+[Provide one of the following values only: Low, Medium, High, Urgent, or NONE. If the fallback answer was used, return PRIORITY as NONE.]
 """
 
     if use_context is True:
@@ -511,15 +537,15 @@ PRIORITY
 
 def llm_response(prompt: str, temperature: int = 1) -> str:
 
-    response = gemini_client.models.generate_content(
-        model='gemini-2.0-flash',
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=temperature,
-            maxOutputTokens=1024
-        )
-    )
-    answer = response.candidates[0].content.parts[0].text
+    # response = gemini_client.models.generate_content(
+    #     model='gemini-2.0-flash',
+    #     contents=prompt,
+    #     config=types.GenerateContentConfig(
+    #         temperature=temperature,
+    #         maxOutputTokens=1024
+    #     )
+    # )
+    # answer = response.candidates[0].content.parts[0].text
     
     # response = groq_client.chat.completions.create(
     #     model="meta-llama/llama-4-maverick-17b-128e-instruct",
@@ -553,7 +579,26 @@ def llm_response(prompt: str, temperature: int = 1) -> str:
     # )
     # answer = response.response.strip()
 
-    return answer
+    url = "https://api.openai.com/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {openai_api_key}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 200,
+        "temperature": temperature
+    }
+
+    response = requests.post(url, headers=headers, data=json.dumps(data))
+    answer = response.json()
+
+    return answer["choices"][0]["message"]["content"]
 
 def embed_tickets(request):
     tickets_payload = []
@@ -667,7 +712,7 @@ def get_payload_to_json(request):
         if payload['query_type'] == None: continue 
         if payload['specific_issue'] == None: continue
 
-        parsed_conversations = get_all_conversations(ticket_id, domain, headers, auth, ticket_description)
+        parsed_conversations = get_all_conversations(ticket_id, ticket_description)
         full_text_conversation = parsed_conversations['full_text_conversation']
 
         problem = None
@@ -956,7 +1001,7 @@ def get_contact(requestor_id, domain, headers, auth):
 
     return contact
 
-def get_all_conversations(ticket_id, domain, headers, auth, ticket_description):
+def get_all_conversations(ticket_id, ticket_description):
     conversations = []
     url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}/conversations"
 

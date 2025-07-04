@@ -13,4 +13,5 @@ db.sqlite3
 cmd.txt
 documents.json
 fields.json
+a.json
 qdrant_storage/
