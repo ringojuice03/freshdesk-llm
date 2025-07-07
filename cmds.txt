@@ -1,0 +1,8 @@
+# Start
+docker-compose up -d
+
+# Stop (this ensures proper cleanup)
+docker-compose down
+
+# Restart
+docker-compose restart
