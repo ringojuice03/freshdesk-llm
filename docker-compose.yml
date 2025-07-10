@@ -15,4 +15,3 @@ services:
     environment:
       - TRANSFORMERS_CACHE=/root/.cache/huggingface
       - HF_HOME=/root/.cache/huggingface
-    restart: unless-stopped

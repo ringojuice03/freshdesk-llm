@@ -11,8 +11,11 @@ db.sqlite3
 *.log
 
 cmd.txt
-documents.json
+# documents.json
 fields.json
 a.json
+docker-compose.yml
+
 qdrant_cache/
 qdrant_storage/
+notebooks/
