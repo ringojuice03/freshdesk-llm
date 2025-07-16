@@ -47,19 +47,8 @@
 
     <hr>
 
-      <h2>Non-RAG</h2>
-      <h3>Query type:</h3>
-      <p>{{ ticket.query_type }}</p>
-      <h3>Specific issue type:</h3>
-      <p>{{ ticket.specific_issue_type }}</p>
-      <h3>Priority level:</h3>
-      <p>{{ ticket.priority }}</p>
-      <h3>Response:</h3>
-      <p>{{ ticket.generated_response }}</p>
-
-    <hr>
-
-      <h2>RAG</h2>
+      <!-- <h2>Non-RAG</h2>
+      
       <h3>Query type:</h3>
       <p>{{ ticket.query_type_no_context }}</p>
       <h3>Specific issue type:</h3>
@@ -68,6 +57,18 @@
       <p>{{ ticket.priority_no_context }}</p>
       <h3>Response:</h3>
       <p>{{ ticket.answer_no_context }}</p>
+
+    <hr> -->
+
+      <h2>RAG</h2>
+      <h3>Query type:</h3>
+      <p>{{ ticket.query_type }}</p>
+      <h3>Specific issue type:</h3>
+      <p>{{ ticket.specific_issue_type }}</p>
+      <h3>Priority level:</h3>
+      <p>{{ ticket.priority }}</p>
+      <h3>Response:</h3>
+      <p>{{ ticket.generated_response }}</p>
 
   </div>
   {% empty %}

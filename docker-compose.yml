@@ -2,12 +2,12 @@ version: '3.8'
 services:
   qdrant:
     image: qdrant/qdrant
-    container_name: qdrant-db
+    container_name: freshdesk-qdrant-db
     user: root
     restart: unless-stopped
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "8333:6333"
+      - "8334:6334"
     volumes:
       - ./qdrant_storage:/qdrant/storage
       - ./qdrant_cache:/root/.cache
