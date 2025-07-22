@@ -18,13 +18,17 @@ gemini_client = genai.Client(api_key=gemini_api_key)
 
 openai_api_key = os.environ.get('OPENAI_API_KEY')
 
+model_names = ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1", "chatgpt-4o-latest"]
+# model_names = ["gpt-4o-mini"]
 
 import ollama
 ollama.pull("mistral")
 
 from qdrant_client import models, QdrantClient
 qd_client = QdrantClient('http://localhost:8333')
-collection_name = 'freshdesk-tickets-rag'
+# collection_name = "freshdesk-tickets-rag"
+collection_name = "strict-resolution-rag"
+
 
 
 with open('fields.json', "r", encoding="utf-8") as f:
@@ -104,7 +108,8 @@ def latest_tickets(request):
 
     ticket_list = []
 
-    for ticket_id in range(23446, 23449):
+    for ticket_id in range(23446, 23450):
+    # for ticket_id in range(23446, 23447):
     # for ticket in tickets:
     #     ticket_id = ticket.get('id')
         description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
@@ -120,34 +125,39 @@ def latest_tickets(request):
 
         parsed_conversations = get_all_conversations(ticket_id, ticket_description)
         full_text_conversation = parsed_conversations['full_text_conversation']
+        customer_conversation_text = parsed_conversations['customer_conversation_text']
+        agent_conversation_text = parsed_conversations['agent_conversation_text']
 
-        # full_text_conversation = translate_conversation(full_text_conversation)
+        # can change to full text convo
 
-        problem = get_problem(full_text_conversation)
-        payload['problem'] = problem
+        model_answers = []
+        for model in model_names:
+            print(f"Model: {model}")
 
-        print(f'Core Problem: {problem}')
+            problem = get_problem(customer_conversation_text, model=model)
+            payload['problem'] = problem
+            print(f'Core Problem: {problem}')
+            rag_classification
+            query_type, specific_issue_type = rag_classification(problem, model=model)
 
-        # to False later
-        is_customer_last_msg = True
-        last_msg = parsed_conversations['ordered_conversation_details'][-1]
-        if last_msg['role'] == 'Customer':
-            is_customer_last_msg = True
-            last_customer_msg = last_msg['body_text']
+            answer, priority = rag(customer_conversation_text, problem, query_type, model=model)
+            model_answers.append({
+                "model": model,
+                "problem": problem,
+                "query_type": query_type,
+                "specific_issue_type": specific_issue_type,
+                "answer": answer,
+                "priority": priority,
+            })
 
-        answer = "Only respond when the customer messaged last."
-        if is_customer_last_msg:
-            query_type, specific_issue_type = rag_classification(problem)
-            answer, priority = rag(problem, query_type)
+        # query_type_no_context, specific_issue_type_no_context = rag_classification(problem, use_context = False)
+        # answer_no_context, priority_no_context = rag(problem, query_type, use_context = False)
 
-            # query_type_no_context, specific_issue_type_no_context = rag_classification(problem, use_context = False)
-            # answer_no_context, priority_no_context = rag(problem, query_type, use_context = False)
-
-        print(f'Query type: {query_type}')
-        print(f'Specific issue type: {specific_issue_type}')
-        print(f'Priority: {priority}')
-        print(f'Answer: {answer}')
-        print('**********')
+        # print(f'Query type: {query_type}')
+        # print(f'Specific issue type: {specific_issue_type}')
+        # print(f'Priority: {priority}')
+        # print(f'Answer: {answer}')
+        # print('**********')
         
         ticket_list.append({
             'id': ticket_id,
@@ -156,10 +166,12 @@ def latest_tickets(request):
             'payload': payload,
 
             # rag
-            'query_type': query_type,
-            'specific_issue_type': specific_issue_type,
-            'generated_response': answer,
-            'priority': priority,
+            # 'query_type': query_type,
+            # 'specific_issue_type': specific_issue_type,
+            # 'priority': priority,
+            # 'generated_response': answer,
+
+            'model_answers': model_answers
 
             # non-rag
             # 'query_type_no_context': query_type_no_context, 
@@ -172,7 +184,7 @@ def latest_tickets(request):
 
     return render(request, 'response.html', {'tickets': ticket_list,})
 
-def rag_classification(problem: str, use_context: bool = True) -> str:
+def rag_classification(problem: str, use_context: bool = True, model: str = "gpt-4o-mini") -> str:
     print("RAG CLASSIFICATION")
     print("Searching relevant documents...")
 
@@ -186,7 +198,7 @@ def rag_classification(problem: str, use_context: bool = True) -> str:
 
     while query_type not in query_type_list or specific_issue_type not in specific_issue_choices:
         print("Generating CLASSIFICATION...")
-        response = llm_response(prompt)
+        response = llm_response(prompt, model=model)
         query_type, specific_issue_type = split_query_and_issue_type(response)
 
         print(f'{query_type} and {specific_issue_type}\n\n')
@@ -195,19 +207,19 @@ def rag_classification(problem: str, use_context: bool = True) -> str:
 
     return query_type, specific_issue_type
 
-def rag(problem: str, query_type: str, use_context: bool = True) -> str:
+def rag(customer_chat: str, problem: str, query_type: str, use_context: bool = True, model: str = "gpt-4o-mini") -> str:
     print("RAG for ANSWER")
     print("Searching relevant documents...")
 
     search_response = rrf_filter_search(problem, query_type)
-    prompt = answer_ticket_prompt(problem, search_response, use_context)
+    prompt = answer_ticket_prompt(customer_chat, problem, search_response, use_context)
 
     print(f'Search results:\n{search_response}\n')
 
     priority = ""
     while priority not in ["Low", "Medium", "High", "Urgent", "NONE"]:
         print("Generating ANSWER...")
-        response = llm_response(prompt)
+        response = llm_response(prompt, model=model)
         answer, priority = split_answer_and_priority(response)
 
         print(f'Answer: {answer}\n and \nPriority: {priority}\n')
@@ -218,11 +230,20 @@ def rag(problem: str, query_type: str, use_context: bool = True) -> str:
 
     return answer, priority
 
-def rrf_search(problem: str, limit: int = 5) -> str:
+def rrf_search(problem: str, operation: str = "normal", limit: int = 5) -> str:
     search_results = qd_client.query_points(
         collection_name=collection_name,
         prefetch=[
             models.Prefetch(
+                # operation filter
+                filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="operation",
+                            match=models.MatchValue(value=operation),
+                        ),
+                    ]
+                ),
                 query=models.Document(
                     text=problem,
                     model="BAAI/bge-large-en-v1.5"
@@ -231,6 +252,15 @@ def rrf_search(problem: str, limit: int = 5) -> str:
                 limit=limit,
             ),
             models.Prefetch(
+                # operation filter
+                filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="operation",
+                            match=models.MatchValue(value=operation),
+                        ),
+                    ]
+                ),
                 query=models.Document(
                     text=problem,
                     model="Qdrant/bm25"
@@ -255,7 +285,7 @@ def rrf_search(problem: str, limit: int = 5) -> str:
 
     return context
 
-def rrf_filter_search(problem: str, query_type: str, limit: int = 5) -> str:
+def rrf_filter_search(problem: str, query_type: str, operation: str = "normal", limit: int = 5) -> str:
     search_results = qd_client.query_points(
         collection_name=collection_name,
         prefetch=[
@@ -265,6 +295,11 @@ def rrf_filter_search(problem: str, query_type: str, limit: int = 5) -> str:
                         models.FieldCondition(
                             key="query_type",
                             match=models.MatchValue(value=query_type),
+                        ),
+                        # operation filter
+                        models.FieldCondition(
+                            key="operation",
+                            match=models.MatchValue(value=operation),
                         ),
                     ]
                 ),
@@ -281,6 +316,11 @@ def rrf_filter_search(problem: str, query_type: str, limit: int = 5) -> str:
                         models.FieldCondition(
                             key="query_type",
                             match=models.MatchValue(value=query_type),
+                        ),
+                        # operation filter
+                        models.FieldCondition(
+                            key="operation",
+                            match=models.MatchValue(value=operation),
                         ),
                     ]
                 ),
@@ -400,7 +440,7 @@ Classify the customer's problem into the appropriate query type and specific iss
 - Use **NONE** if no suitable category exists
 
 ## OUTPUT FORMAT
-Provide exactly two sections with no additional commentary, explanations, or formatting:
+**CRITICAL**: Use the exact keyword given in the available QUERY TYPES and SPECIFIC ISSUE TYPES. Always return output in exactly the following format with no additional commentary, explanations, or formatting:
 
 QUERY TYPE:
 [ONLY ONE selected category from AVAILABLE QUERY TYPES or NONE]
@@ -423,19 +463,26 @@ SPECIFIC ISSUE TYPE:
 
     return prompt
 
-def answer_ticket_prompt(problem: str, context: str, use_context: bool = True) -> str:
+def answer_ticket_prompt(customer_chat: str, problem: str, context: str, use_context: bool = True) -> str:
     prompt_template = """
 ## ROLE & CONTEXT
-You are a customer support representative for Tindahang Tapat, a digital platform enabling sari-sari stores to order groceries via mobile phone. Generate appropriate responses using only the provided knowledge base context.
+You are a customer support representative for Tindahang Tapat, a digital platform enabling sari-sari stores to order groceries via mobile phone. Generate appropriate responses using STRICTLY AND ONLY the provided knowledge base context.
 
 ## PRIMARY OBJECTIVE
-Deliver accurate, helpful solutions to customer problems based strictly on available CONTEXT information, while maintaining professional service standards.
+Deliver accurate, helpful solutions to customer problems based EXCLUSIVELY on available CONTEXT information, while maintaining professional service standards.
 
-## RESPONSE METHODOLOGY
+## CRITICAL CONTEXT ADHERENCE RULES
+**ABSOLUTE REQUIREMENT**: Your response must be based ONLY on information explicitly provided in the CONTEXT section below. The customer problem and chat data provide situational understanding, but solutions must come from CONTEXT.
+
+### Context Usage Protocol
+- **ONLY use information from CONTEXT**: No external knowledge, assumptions, or inferences
+- **Direct correlation required**: Solution must directly address the customer problem using context information
+- **No creative interpretation**: If context doesn't explicitly cover the problem, use fallback response
+- **Complete context dependency**: Even common sense solutions must be supported by context content
 
 ### Content Requirements
 - **Context fidelity**: Use ONLY information from the provided CONTEXT
-- **Solution focus**: Prioritize actionable steps and clear guidance
+- **Solution focus**: Prioritize actionable steps and clear guidance FROM CONTEXT
 - **Completeness**: Address all aspects of the customer's problem when context allows
 - **Accuracy**: Never infer or assume details not explicitly stated in context
 
@@ -445,8 +492,10 @@ Deliver accurate, helpful solutions to customer problems based strictly on avail
 - **Clarity**: Avoid technical jargon; use simple, direct language
 - **Brevity**: Concise responses (2-4 sentences) that fully address the issue
 
-### Fallback Protocol
-When context is insufficient, use exactly: *"I don't have specific information about this issue in my current resources. Please contact our support team at [support contact] for immediate assistance with your concern."*
+### Mandatory Fallback Protocol
+**STRICT RULE**: If the CONTEXT does not contain information that directly addresses the customer problem, you MUST use the fallback response. Do not attempt to provide general advice or solutions not found in the context.
+
+**Fallback Response**: *"I don't have specific information about this issue in my current resources. Please contact our support team at [support contact] for immediate assistance with your concern."*
 
 ## INPUT DATA
 
@@ -455,30 +504,55 @@ When context is insufficient, use exactly: *"I don't have specific information a
 {context}
 ```
 
-### Customer Problem
+### Customer Problem (Primary Issue)
 ```
 {problem}
 ```
 
-## RESPONSE GENERATION RULES
+### Customer Conversation Data (Additional Context)
+```
+{customer_chat}
+```
 
-### Content Validation
-1. **Context check**: Ensure solution exists in provided context. DO NOT INVENT A SOLUTION THAT IS NOT IN THE CONTEXT.
-2. **Completeness check**: Verify all problem aspects are addressed
-3. **Accuracy check**: Confirm no assumptions beyond context are made
-4. **Tone check**: Maintain professional, helpful customer service voice
+## RESPONSE GENERATION PROCESS
 
-### Quality Standards
-- **Actionable**: Include specific steps when solutions are available
+### Step 1: Context Analysis
+1. **Read the customer problem** to understand the core issue
+2. **Search the CONTEXT** for information that directly addresses this problem
+3. **Verify relevance**: Ensure context information specifically applies to the customer's situation
+4. **Assess completeness**: Determine if context provides sufficient information for a complete solution
+
+### Step 2: Solution Validation
+1. **Context check**: Confirm solution exists in provided context - DO NOT INVENT ANY SOLUTION
+2. **Direct mapping**: Ensure each part of your response references specific context information
+3. **Completeness check**: Verify all problem aspects can be addressed with available context
+4. **Fallback trigger**: If context is insufficient or irrelevant, use mandatory fallback response
+
+### Step 3: Response Construction
+1. **Context-only content**: Build response using exclusively context information
+2. **Problem alignment**: Ensure response directly addresses the customer's stated problem
+3. **Actionable guidance**: Include specific steps when available in context
+4. **Professional tone**: Maintain helpful, customer service voice
+
+## QUALITY STANDARDS
+- **Actionable**: Include specific steps when solutions are available in context
 - **Comprehensive**: Address root cause when context provides sufficient detail
 - **Preventive**: Mention prevention tips if included in context
-- **Follow-up ready**: Set clear expectations for next steps if needed
+- **Follow-up ready**: Set clear expectations for next steps if provided in context
+
+## VALIDATION CHECKLIST
+Before providing your response, verify:
+- [ ] Does the CONTEXT contain information directly relevant to the customer problem?
+- [ ] Can I provide a complete solution using ONLY the context information?
+- [ ] Have I avoided adding any information not found in the context?
+- [ ] If context is insufficient, have I used the mandatory fallback response?
+- [ ] Does my response directly address the customer's primary concern?
 
 ## OUTPUT REQUIREMENTS
-With no additional commentary, explanations, or formatting, always return output in the following two sections:
+**CRITICAL**: Always return output in exactly the following format with no additional commentary, explanations, or formatting:
 
 ANSWER:  
-[Provide a complete customer response based on context - 2-4 sentences addressing their problem with specific, actionable guidance in Taglish. If the context does not include relevant information, use exactly: "ANSWER: I don't have specific information about this issue in my current resources. Please contact our support team at [support contact] for immediate assistance with your concern."]
+[Provide a complete customer response based ONLY on context - 2-4 sentences addressing their problem with specific, actionable guidance in Taglish. If the context does not contain relevant information that directly addresses the customer problem, use exactly: "ANSWER: I don't have specific information about this issue in my current resources. Please contact our support team at [support contact] for immediate assistance with your concern."]
 
 PRIORITY:  
 [Provide one of the following values only: Low, Medium, High, Urgent, or NONE. If the fallback answer was used, return PRIORITY as NONE.]
@@ -532,13 +606,13 @@ PRIORITY:
 """
 
     if use_context is True:
-        prompt = prompt_template.format(context=context, problem=problem)
+        prompt = prompt_template.format(context=context, customer_chat=customer_chat, problem=problem)
     else:
         prompt = prompt_template_no_context.format(problem=problem)
     
     return prompt
 
-def llm_response(prompt: str, temperature: int = 1) -> str:
+def llm_response(prompt: str, temperature: int = 1, model: str = "gpt-4o-mini", llm_provider: str = "openai") -> str:
 
     # response = gemini_client.models.generate_content(
     #     model='gemini-2.0-flash',
@@ -550,26 +624,6 @@ def llm_response(prompt: str, temperature: int = 1) -> str:
     # )
     # answer = response.candidates[0].content.parts[0].text
     
-    # response = groq_client.chat.completions.create(
-    #     model="meta-llama/llama-4-maverick-17b-128e-instruct",
-    #     messages=[
-    #     {
-    #         "role": "user",
-    #         "content": prompt,
-    #     }
-    #     ],
-    #     temperature=temperature,
-    #     max_completion_tokens=1024,
-    #     top_p=1,
-    #     stream=True,
-    #     stop=None,
-    # )
-
-    # answer = ""
-    # for chunk in response:
-    #     content = chunk.choices[0].delta.content or ""
-    #     answer += content
-
     # response = ollama.generate(
     #     model="mistral", 
     #     prompt=prompt, 
@@ -582,30 +636,54 @@ def llm_response(prompt: str, temperature: int = 1) -> str:
     # )
     # answer = response.response.strip()
 
-    url = "https://api.openai.com/v1/chat/completions"
+    if llm_provider == "groq":
+        response = groq_client.chat.completions.create(
+            model="meta-llama/llama-4-maverick-17b-128e-instruct",
+            messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+            ],
+            temperature=temperature,
+            max_completion_tokens=1024,
+            top_p=1,
+            stream=True,
+            stop=None,
+        )
 
-    headers = {
-        "Authorization": f"Bearer {openai_api_key}",
-        "Content-Type": "application/json"
-    }
+        answer = ""
+        for chunk in response:
+            content = chunk.choices[0].delta.content or ""
+            answer += content
 
-    data = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 200,
-        "temperature": temperature
-    }
+    if llm_provider == "openai":
+        url = "https://api.openai.com/v1/chat/completions"
 
-    response = requests.post(url, headers=headers, data=json.dumps(data))
-    answer = response.json()
+        headers = {
+            "Authorization": f"Bearer {openai_api_key}",
+            "Content-Type": "application/json"
+        }
 
-    return answer["choices"][0]["message"]["content"]
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "max_completion_tokens": 250,
+            "temperature": temperature
+        }
+
+        response = requests.post(url, headers=headers, data=json.dumps(data))
+        answer = response.json()
+        answer = answer["choices"][0]["message"]["content"]
+
+    return answer
 
 def embed_tickets(request):
     tickets_payload = []
-    with open("documents.json", "r", encoding="utf-8") as f:
+
+    with open("data_openai.json", "r", encoding="utf-8") as f:
         tickets_payload = json.load(f)
 
     print('Initializing qdrant client')  
@@ -625,11 +703,10 @@ def embed_tickets(request):
         },
     )
 
-    print('Uploading data points...')
-    qd_client.upsert(
-        collection_name=collection_name,
-        points=[
-            models.PointStruct(
+    points = []
+    for ticket in tickets_payload:
+        if "unresolved" not in ticket['resolution'].lower():
+            point = models.PointStruct(
                 id=ticket['id'],
                 vector={
                     "baai-large": models.Document(
@@ -643,12 +720,23 @@ def embed_tickets(request):
                 },
                 payload=ticket
             )
+            points.append(point)
+            print(ticket['id'])
 
-            for ticket in tickets_payload
-        ]
+    print('Uploading data points...')
+    qd_client.upsert(
+        collection_name=collection_name,
+        points=points,
     )
 
     print('Indexing payload...')
+
+    qd_client.create_payload_index(
+        collection_name=collection_name,
+        field_name="operation",
+        field_schema="keyword"
+    )
+
     qd_client.create_payload_index(
         collection_name=collection_name,
         field_name="priority",
@@ -698,7 +786,8 @@ def get_payload_to_json(request):
     tickets_payload = []
 
     print('Fetching tickets')
-    for ticket_id in range(523, 526):
+    # for ticket_id in range(0, 101):
+    for ticket_id in range(23446, 23447):
         print(ticket_id)
         description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
         response = requests.get(description_url, headers=headers, auth=auth)
@@ -718,21 +807,19 @@ def get_payload_to_json(request):
         parsed_conversations = get_all_conversations(ticket_id, ticket_description)
         full_text_conversation = parsed_conversations['full_text_conversation']
 
-        problem = None
-        resolution = None
+        payload['conversation'] = full_text_conversation
+        print(full_text_conversation)
 
-        while problem is None or resolution is None:
-            problem, resolution = get_problem_and_resolution(full_text_conversation)
+        problem, resolution, operation = get_problem_and_resolution(payload, llm_provider="openai")
 
         payload['problem'] = problem
         payload['resolution'] = resolution
-
-        print(f'Problem: {problem}\n\nResolution: {resolution}')
-        print('-----')
+        payload['operation'] = operation
 
         tickets_payload.append(payload) 
 
-        file_path = "documents.json"
+        # file_path = "documents.json"
+        file_path = "data_openai.json"
         if os.path.exists(file_path):
             with open(file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -751,7 +838,9 @@ def split_problem_and_resolution(text) -> tuple[str, str]:
     pattern = r"""
         [#\*\s]*CORE\s+PROBLEM\s+STATEMENT[:\s\#\*]*
         (.*?)                                  
-        [#\*\s]*RESOLUTION[:\s\#\*]*    
+        [#\*\s]*RESOLUTION[:\s\#\*]*
+        (.*?)                      
+        [#\*\s]*OPERATION\s+TYPE[:\s\#\*]*
         (.*)                          
     """
 
@@ -759,9 +848,10 @@ def split_problem_and_resolution(text) -> tuple[str, str]:
     if match:
         problem = match.group(1).strip()
         resolution = match.group(2).strip()
-        return problem, resolution
+        operation = match.group(3).strip()
+        return problem, resolution, operation
     else:
-        return None, None
+        return None, None, None
 
 def split_query_and_issue_type(text: str) -> tuple[str, str]:
     pattern = r"""
@@ -795,7 +885,7 @@ def split_answer_and_priority(text: str) -> tuple[str, str]:
     else:
         return None, None
 
-def get_problem(full_text_conversation) -> str:
+def get_problem(customer_conversation_text: str, model: str = "gpt-4o-mini") -> str:
 #     prompt_template = """
 # ```
 # ## CONTEXT
@@ -994,118 +1084,221 @@ Provide ONLY the section below. No explanations, commentary, or additional text.
 [Standardized problem statement with ALL products normalized as "items"]
 """
 
-    prompt = prompt_template.format(conversation=full_text_conversation)
+    prompt = prompt_template.format(conversation=customer_conversation_text)
     answer = llm_response(prompt, temperature=0.4)
 
     return answer
 
-def get_problem_and_resolution(full_text_conversation) -> tuple[str, str]:
+def get_problem_and_resolution(payload, llm_provider: str = "groq") -> tuple[str, str]:
+#     prompt_template = """
+# ## ROLE
+# You are analyzing customer support conversations for Tindahang Tapat, a digital platform enabling sari-sari stores to order groceries via mobile phone. Your task is to extract standardized problem-resolution pairs for a RAG knowledge base.
+
+# The CONVERSATION DATA contains messages from the customer and the agent (customer service representative).
+
+# ## CONVERSATION DATA
+# {conversation}
+
+# ## QUERY TYPE - This the general classification of the customer's concern, identified by the agent.
+# {query_type}
+
+# ## SPECIFIC ISSUE - This is the specific classification of the customer's concern, identified by the agent.
+# {specific_issue}
+
+# ## TASK
+# Extract the CORE PROBLEM STATEMENT and RESOLUTION based on the given CONVERSATION DATA, QUERY TYPE, and SPECIFIC ISSUE.
+
+# ## OUTPUT REQUIREMENTS
+
+# ### CORE PROBLEM STATEMENT
+# - Must be based on the main concern of the customer
+# - If multiple concerns exist, focus on the main one. ONLY ONE customer problem should be included in the CORE PROBLEM STATEMENT.
+# - Do NOT include assumptions about possible impact to the customer
+# - Focus only on problems explicitly stated by the customer
+# - If no problem exists, output: "No identifiable problem"
+# - Length: Exactly 2-3 sentences
+
+# ### RESOLUTION
+# - Must be based on concrete actions taken by the agent to resolve the customer's main issue
+# - Promises, reassurances, explanations, or status updates do NOT count as resolution
+# - If no concrete resolution exists, output: "Unresolved"
+# - Length: Exactly 2-3 sentences for resolved cases, single word "Unresolved" for unresolved cases
+
+# ## WHAT CONSTITUTES CONCRETE RESOLUTION
+# **RESOLVED status requires concrete action taken by the agent:**
+# - Refund processed and confirmed
+# - Replacement item dispatched
+# - Technical issue fixed (account unlocked, payment processed, etc.)
+# - Correct information provided with verification
+# - Problem directly addressed with measurable outcome
+# - Compensation or credits applied to account
+
+# ## WHAT DOES NOT CONSTITUTE RESOLUTION
+# **The following are NOT resolutions and should be marked "Unresolved":**
+# - Promises or reassurances ("we will try", "team will attempt", "we will follow up")
+# - Explanations without solutions (explaining why problem occurred)
+# - Information gathering only (asking for details without solving)
+# - Escalations without final resolution
+# - Apologies without corrective action
+# - Status updates without problem resolution
+# - Acknowledgments of concerns without action
+
+# ## OBJECTIVITY REQUIREMENTS
+# **ELIMINATE ALL EMOTIONAL AND SUBJECTIVE LANGUAGE:**
+
+# ### Prohibited Emotional Language
+# - Customer emotions: "frustrated", "angry", "upset", "disappointed", "happy", "satisfied", "annoyed", "worried", "concerned", "stressed"
+# - Agent emotions: "apologetic", "sympathetic", "understanding", "helpful", "caring"
+# - Emotional reactions: "complained", "expressed dissatisfaction", "was pleased", "felt relieved"
+# - Subjective descriptions: "terrible experience", "great service", "poor quality", "excellent response"
+
+# ### Required Objective Language
+# - Use factual, neutral verbs: "reported", "stated", "indicated", "requested", "received", "experienced"
+# - Focus on actions and events, not feelings about them
+# - Describe what happened, not how anyone felt about it
+# - Use technical, operational language
+
+# ## NORMALIZATION RULES
+# Replace all specific details with standardized terms:
+
+# ### Customer References
+# - Any customer name → "customer"
+# - Any store name → "customer's store"
+# - Any order number/ID → "customer order"
+# - Any account details → "customer account"
+# - Specific amounts → "order amount" or "payment amount"
+
+# ### CRITICAL: Product Normalization
+# **ALWAYS replace ALL specific product names with items**
+# - "Nescafe 3-in-1 sachets" → items
+# - "Tide powder 1kg" → items
+# - "Lucky Me noodles" → items
+# - "Coca-Cola 1.5L" → items
+# - "Pantene shampoo" → items
+# - "Kopiko coffee" → items
+# - "Maggi seasoning" → items
+# - ANY brand name or specific product → items
+
+# ### Time References
+# - Specific dates → "scheduled delivery date"
+# - Specific times → "delivery time"
+# - Time periods → "delivery window"
+
+# ### Location References
+# - Specific addresses → "delivery location"
+# - Cities/regions → "delivery area"
+# - Landmarks → "delivery location"
+
+# ### External Factors
+# - Weather events (storms, typhoons, floods) → "weather conditions"
+# - Traffic issues → "traffic conditions"
+# - System problems → "technical issues"
+
+# ### Technical Terms
+# - "App crashed/froze/stopped/won't work" → "mobile application became unresponsive"
+# - "Payment failed/declined/error/won't process" → "payment processing failed"
+# - "Can't login/access/sign in" → "authentication failed"
+# - "Won't load/loading/stuck loading" → "content failed to load"
+
+# ## CRITICAL INSTRUCTIONS
+# 1. Read the conversation completely to identify the main customer concern
+# 2. Apply ALL normalization rules - especially product normalization to "items". DO NOT EVER NAME A SPECIFIC PRODUCT BRAND OR THE TYPE OF PRODUCT (e.g Alaska, corned beef, etc.)
+# 3. Mark as "RESOLVED" ONLY if concrete action was taken to fix the problem
+# 4. If only promises, explanations, or reassurances were given, mark as "Unresolved"
+# 5. Remove all specific dates, times, locations, and external factors
+# 6. Focus on the functional problem, not emotional context
+# 7. Ensure language is generic and searchable for RAG retrieval
+
+# ## OUTPUT FORMAT
+# **CRITICAL**: Provide ONLY the section below. No explanations, commentary, or additional text.
+
+# CORE PROBLEM STATEMENT:
+# [2-3 sentences describing the main customer concern, normalized]
+
+# RESOLUTION:
+# [2-3 sentences describing concrete actions taken by agent, normalized] [Status: RESOLVED] OR [Unresolved]
+# """
+
     prompt_template = """
-## CONTEXT
-You are analyzing customer support conversations for Tindahang Tapat, a digital platform enabling sari-sari stores to order groceries via mobile phone. Your task is to extract standardized problem-resolution pairs for a RAG knowledge base.
+## ROLE
+Analyze customer support conversations for Tindahang Tapat to extract standardized problem-resolution pairs for RAG knowledge base.
 
-## ANALYSIS REQUIREMENTS
-
-### Problem Statement Extraction
-Create a **searchable, generic problem description** that:
-- **Focuses on function over emotion**: Describe what failed/broke, not how customers felt
-- **Uses standard terminology**: Platform features, order processes, payment methods, product categories
-- **Removes ALL specificity**: No customer names, order numbers, specific brands, or timestamps
-- **Enables similarity matching**: Use consistent vocabulary for similar issues
-- **Length**: Exactly 2-3 sentences
-
-### Resolution Documentation  
-Provide an **actionable solution summary** that:
-- **Details specific steps**: What the agent did to resolve the issue
-- **Includes verification**: How resolution was confirmed
-- **Notes preventive measures**: Steps to avoid recurrence (if applicable)
-- **States clear outcome**: "RESOLVED" with method, or "UNRESOLVED" with next steps
-- **Length**: Exactly 2-3 sentences
-
-## MANDATORY STANDARDIZATION RULES
-
-### CRITICAL: Product Normalization
-**ALWAYS replace ALL specific product names, brands, and descriptions with "items"**
-- "Nescafe 3-in-1 sachets" → "items"
-- "Tide powder 1kg" → "items"
-- "Lucky Me instant noodles" → "items"
-- "Coca-Cola 1.5L bottles" → "items"
-- "Pantene shampoo 200ml" → "items"
-- "instant coffee product" → "items"
-- "laundry detergent" → "items"
-- "beverage products" → "items"
-- ANY specific product reference → "items"
-
-### Other Critical Normalizations
-**Customer References**
-- Any customer name → "customer"
-- Any store name/location → "customer's store"
-- Any order number/ID → "customer order"
-- Any account details → "customer account"
-- Specific amounts → "order amount" or "payment amount"
-
-**Technical Terms**
-- "App crashed/froze/stopped/won't work" → "mobile application became unresponsive"
-- "Payment failed/declined/error/won't process" → "payment processing failed"
-- "Can't login/access/sign in" → "authentication failed"
-- "Won't load/loading/stuck loading" → "content failed to load"
-- "System error/bug/glitch" → "system malfunction occurred"
-
-**Process References**
-- "Ordering/checkout/purchasing process" → "order placement process"
-- "Delivery tracking/monitoring" → "order status tracking"
-- "Cart/basket/shopping list" → "shopping cart"
-- "Account setup/registration" → "account creation process"
-
-### Language Standardization
-- **Payment issues**: "payment processing", "transaction failure", "payment method error"
-- **Delivery problems**: "delivery scheduling issue", "logistics coordination failure", "order fulfillment problem"
-- **Product concerns**: "item availability issue", "inventory discrepancy", "catalog display problem"
-- **Account access**: "login authentication failure", "account verification issue", "profile access problem"
-- **App functionality**: "mobile app malfunction", "platform feature failure", "system functionality error"
-
-### Absolute Exclusions
-**NEVER include:**
-- Any brand names, specific product names, or detailed item descriptions
-- Customer names, store names, specific locations
-- Order numbers, account IDs, reference codes, transaction IDs
-- Agent names, department names, company structure references
-- Timestamps, dates, or time-specific information
-- Monetary amounts (use "order amount" instead)
-- Emotional language ("frustrated", "angry", "happy", "satisfied")
-- Greetings, sign-offs, pleasantries, or social conversation
-- Repetitive confirmations or multiple explanations of same issue
-
-## CONVERSATION DATA
-{conversation}
-
-## CRITICAL INSTRUCTIONS
-1. Read the conversation completely
-2. Identify the PRIMARY functional problem and its resolution
-3. Apply ALL standardization rules - especially product normalization to "items"
-4. Write exactly 2-3 sentences for each section
-5. Verify NO specific product names, brands, or identifiers remain
-6. Ensure language is generic and searchable
+## INPUT DATA
+CONVERSATION: {conversation}
+QUERY TYPE: {query_type}
+SPECIFIC ISSUE: {specific_issue}
 
 ## OUTPUT REQUIREMENTS
-Provide ONLY the sections below. No explanations, commentary, or additional text.
+
+### CORE PROBLEM STATEMENT (2-3 sentences)
+- Main customer concern only (if multiple, pick primary)
+- Based on explicit customer statements, not assumptions
+- Use objective, factual language
+
+### RESOLUTION (2-3 sentences or "Unresolved")
+**RESOLVED**: Concrete action taken (refund processed, item dispatched, issue fixed, credits applied)
+**Unresolved**: Promises, explanations, escalations, or reassurances only
+
+### OPERATION TYPE
+- **typhoon**: Weather-related disruptions, storm mentions, emergency protocols
+- **christmas**: Holiday season references, December timeframes, seasonal delays
+- **normal**: Default for all other cases
+**IMPORTANT**: If weather/storm is mentioned ANYWHERE in the conversation as a cause of service disruption, mark as "typhoon" regardless of current status.
+
+## NORMALIZATION RULES
+**Replace the following specifics with generic terms:**
+- Names/stores/IDs → "customer", "customer's store", "customer order"
+- ALL products → "items" (regardless of brand/type)
+- Dates/times → "scheduled delivery date", "delivery time"
+- Tech issues → "mobile application became unresponsive", "payment processing failed", "authentication failed"
+**Critical - Excluding the aforementioned, keywords should be preserved.**
+
+## PROHIBITED LANGUAGE
+Remove all emotional/subjective terms: frustrated, angry, disappointed, apologetic, terrible, great, complained, pleased, etc.
+Use neutral verbs: reported, stated, indicated, requested, received, experienced.
+
+## CRITICAL INSTRUCTIONS
+1. **Read the ENTIRE conversation** - analyze all messages from both customer and agent
+2. **Operation Type Priority**: If ANY weather-related disruption is mentioned (even if resolved), classify as "typhoon"
+3. Apply normalization rules but preserve operation type context
+4. Mark as "RESOLVED" ONLY if concrete action was taken to fix the problem
+5. If only promises, explanations, or reassurances were given, mark as "Unresolved"
+6. Remove all specific dates, times, locations, and external factors
+7. Focus on the functional problem, not emotional context
+8. Ensure language is generic and searchable for RAG retrieval
+9. Use objective, neutral language throughout
+
+## OUTPUT FORMAT
+# **CRITICAL**: Provide ONLY the section below. No explanations, commentary, or additional text.
 
 CORE PROBLEM STATEMENT:
-[Generic, searchable problem description with ALL products normalized as "items"]
+[normalized 2-3 sentences]
 
 RESOLUTION:
-[Actionable solution steps and final status: RESOLVED or UNRESOLVED with next steps]
+[normalized 2-3 sentences with [Status: RESOLVED]] OR [Unresolved]
+
+OPERATION TYPE:
+[normal/typhoon/christmas]
 """
-    prompt = prompt_template.format(conversation=full_text_conversation)
+
+    prompt = prompt_template.format(
+        conversation=payload['conversation'], 
+        query_type=payload['query_type'], 
+        specific_issue=payload['specific_issue'],
+    )
 
     problem = None
     resolution = None
+    operation = None
 
-    while problem is None or resolution is None:
-        response = llm_response(prompt, temperature=0.4)
-        problem, resolution = split_problem_and_resolution(response)
+    while (problem is None or resolution is None or operation is None) or ("CORE PROBLEM STATEMENT" in resolution) or (operation not in ["normal", "typhoon", "christmas"]):
+        response = llm_response(prompt, temperature=0.3, llm_provider=llm_provider)
+        print(response)
+        problem, resolution, operation = split_problem_and_resolution(response)
+        print(f'\nProblem: {problem}\n\nResolution: {resolution}\n\nOperation: {operation}')
+        print('-----')
 
-    return problem, resolution
+    return problem, resolution, operation
 
 def get_contact(requestor_id, domain, headers, auth):
     contact_url = f"https://{domain}.freshdesk.com/api/v2/contacts/{requestor_id}"
@@ -1141,9 +1334,8 @@ def parse_freshdesk_conversations(conversations, ticket_description) -> dict:
     sorted_conversations = sorted(conversations, key=lambda x: x['created_at'])
     
     full_text_conversation = ""
-    full_conversation = []
-    customer_conversation = []
-    agent_conversation = []
+    customer_conversation_text = ""
+    agent_conversation_text = ""
     ordered_conversation_details = []
 
     message_data = {
@@ -1155,10 +1347,9 @@ def parse_freshdesk_conversations(conversations, ticket_description) -> dict:
         'role': 'Customer'
     }
 
-    message = f'Customer: {message_data['body_text']}'
+    message = f'{ticket_description['created_at']} Customer: {message_data['body_text']}'
     full_text_conversation += message + "\n"
-    full_conversation.append(message)
-    customer_conversation.append(message_data['body_text'])
+    customer_conversation_text += message + "\n"
     ordered_conversation_details.append(message_data)
 
     for i, conv in enumerate(sorted_conversations, 2):
@@ -1173,25 +1364,22 @@ def parse_freshdesk_conversations(conversations, ticket_description) -> dict:
         if message_data['body_text'] == '':
             continue
         if conv['incoming']:
-            message = f'Customer: {message_data['body_text']}'
+            message = f'{conv['created_at']} Customer: {message_data['body_text']}'
             full_text_conversation += message + "\n" 
-            full_conversation.append(message)
+            customer_conversation_text += message + "\n"
             message_data['role'] = 'Customer'
-            customer_conversation.append(message_data['body_text'])
         else:
-            message = f'Agent: {message_data['body_text']}'
+            message = f'{conv['created_at']} Agent: {message_data['body_text']}'
             full_text_conversation += message + "\n" 
-            full_conversation.append(message)
+            agent_conversation_text += message + "\n"
             message_data['role'] = 'Agent'
-            agent_conversation.append(message_data['body_text'])
 
         ordered_conversation_details.append(message_data)
-        
+
     return {
         'full_text_conversation': full_text_conversation,
-        'full_conversation': full_conversation,
-        'customer_conversation': customer_conversation,
-        'agent_conversation': agent_conversation,
+        'customer_conversation_text': customer_conversation_text,
+        'agent_conversation_text': agent_conversation_text,
         'ordered_conversation_details': ordered_conversation_details,
     }
 

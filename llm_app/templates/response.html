@@ -39,13 +39,13 @@
       {% endfor %}
     </ul>
 
-    <hr>
+    <!-- <hr>
 
       <h2>Prompt</h2>
       <h3>Summarized Problem:</h3>
-      <p>{{ ticket.payload.problem }}</p>
+      <p>{{ ticket.payload.problem }}</p> -->
 
-    <hr>
+    <!-- <hr> -->
 
       <!-- <h2>Non-RAG</h2>
       
@@ -60,15 +60,35 @@
 
     <hr> -->
 
-      <h2>RAG</h2>
+      <!-- <h2>RAG</h2>
       <h3>Query type:</h3>
       <p>{{ ticket.query_type }}</p>
       <h3>Specific issue type:</h3>
       <p>{{ ticket.specific_issue_type }}</p>
       <h3>Priority level:</h3>
-      <p>{{ ticket.priority }}</p>
+      <p>{{ ticket.priority }}</p> -->
+
+    {% for model in ticket.model_answers %}
+      <hr>
+
+      <h2>Model: {{ model.model }}</h2>
+
+      <h3>Summarized Problem:</h3>
+      <p>{{ model.problem }}</p>
+
+      <!-- <h3>Query type:</h3>
+      <p>{{ model.query_type }}</p>
+
+      <h3>Specific issue type:</h3>
+      <p>{{ model.specific_issue_type }}</p>
+
+      <h3>Priority level:</h3>
+      <p>{{ model.priority }}</p> -->
+
       <h3>Response:</h3>
-      <p>{{ ticket.generated_response }}</p>
+      <p>{{ model.answer }}</p>
+
+    {% endfor %}
 
   </div>
   {% empty %}
