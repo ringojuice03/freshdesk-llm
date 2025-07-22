@@ -70,28 +70,28 @@ STATUS_MAP = {
 }
 
 def hello_world(request):
-    for ticket_id in range(22296, 22297):
-        print(ticket_id)
-        description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
-        response = requests.get(description_url, headers=headers, auth=auth)
+    # for ticket_id in range(22296, 22297):
+    #     print(ticket_id)
+    #     description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
+    #     response = requests.get(description_url, headers=headers, auth=auth)
     
-        if response.status_code == 200:
-            ticket_description = response.json()
-        else:
-            print(f"Ticket ID {ticket_id} not found (Status: {response.status_code}). Skipping...")
-            continue
+    #     if response.status_code == 200:
+    #         ticket_description = response.json()
+    #     else:
+    #         print(f"Ticket ID {ticket_id} not found (Status: {response.status_code}). Skipping...")
+    #         continue
 
-        doc = get_payload(ticket_description)
+    #     doc = get_payload(ticket_description)
 
-        parsed_conversations = get_all_conversations(ticket_id, ticket_description)
-        full_text_conversation = parsed_conversations['full_text_conversation']
+    #     parsed_conversations = get_all_conversations(ticket_id, ticket_description)
+    #     full_text_conversation = parsed_conversations['full_text_conversation']
 
-        problem, resolution = get_problem_and_resolution(full_text_conversation)
-        doc['problem'] = problem
-        doc['resolution'] = resolution
+    #     problem, resolution = get_problem_and_resolution(full_text_conversation)
+    #     doc['problem'] = problem
+    #     doc['resolution'] = resolution
 
-        print(full_text_conversation)
-        print('-----')
+    #     print(full_text_conversation)
+    #     print('-----')
 
     
     return render(request, 'hello.html')
