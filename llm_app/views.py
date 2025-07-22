@@ -18,7 +18,6 @@ gemini_client = genai.Client(api_key=gemini_api_key)
 
 openai_api_key = os.environ.get('OPENAI_API_KEY')
 
-
 import ollama
 ollama.pull("mistral")
 
@@ -104,9 +103,9 @@ def latest_tickets(request):
 
     ticket_list = []
 
-    for ticket_id in range(23446, 23449):
-    # for ticket in tickets:
-    #     ticket_id = ticket.get('id')
+    # for ticket_id in range(23446, 23449):
+    for ticket in tickets:
+        ticket_id = ticket.get('id')
         description_url = f"https://{domain}.freshdesk.com/api/v2/tickets/{ticket_id}"
         ticket_description = requests.get(description_url, headers=headers, auth=auth).json()
 
@@ -120,10 +119,11 @@ def latest_tickets(request):
 
         parsed_conversations = get_all_conversations(ticket_id, ticket_description)
         full_text_conversation = parsed_conversations['full_text_conversation']
+        customer_conversation = parsed_conversations['customer_conversation']
 
         # full_text_conversation = translate_conversation(full_text_conversation)
 
-        problem = get_problem(full_text_conversation)
+        problem = get_problem(customer_conversation)
         payload['problem'] = problem
 
         print(f'Core Problem: {problem}')
@@ -137,11 +137,15 @@ def latest_tickets(request):
 
         answer = "Only respond when the customer messaged last."
         if is_customer_last_msg:
+            print("RAG")
             query_type, specific_issue_type = rag_classification(problem)
             answer, priority = rag(problem, query_type)
 
-            # query_type_no_context, specific_issue_type_no_context = rag_classification(problem, use_context = False)
-            # answer_no_context, priority_no_context = rag(problem, query_type, use_context = False)
+            print("******************************")
+
+            print("NON-RAG")
+            query_type_no_context, specific_issue_type_no_context = rag_classification(problem, use_context = False)
+            answer_no_context, priority_no_context = rag(problem, query_type, use_context = False)
 
         print(f'Query type: {query_type}')
         print(f'Specific issue type: {specific_issue_type}')
@@ -162,10 +166,10 @@ def latest_tickets(request):
             'priority': priority,
 
             # non-rag
-            # 'query_type_no_context': query_type_no_context, 
-            # 'specific_issue_type_no_context': specific_issue_type_no_context,
-            # 'answer_no_context': answer_no_context,
-            # 'priority_no_context': priority_no_context,
+            'query_type_no_context': query_type_no_context, 
+            'specific_issue_type_no_context': specific_issue_type_no_context,
+            'answer_no_context': answer_no_context,
+            'priority_no_context': priority_no_context,
         })
         
         print('----------')
@@ -173,7 +177,7 @@ def latest_tickets(request):
     return render(request, 'response.html', {'tickets': ticket_list,})
 
 def rag_classification(problem: str, use_context: bool = True) -> str:
-    print("RAG CLASSIFICATION")
+    print("Classification.")
     print("Searching relevant documents...")
 
     search_response = rrf_search(problem)
@@ -196,7 +200,7 @@ def rag_classification(problem: str, use_context: bool = True) -> str:
     return query_type, specific_issue_type
 
 def rag(problem: str, query_type: str, use_context: bool = True) -> str:
-    print("RAG for ANSWER")
+    print("Answer...")
     print("Searching relevant documents...")
 
     search_response = rrf_filter_search(problem, query_type)
@@ -589,8 +593,10 @@ def llm_response(prompt: str, temperature: int = 1) -> str:
         "Content-Type": "application/json"
     }
 
+    # "gpt-4o-mini"
+    # "gpt-4.1-mini"
     data = {
-        "model": "gpt-4o-mini",
+        "model": "gpt-4.1-mini",
         "messages": [
             {"role": "user", "content": prompt}
         ],
@@ -610,20 +616,20 @@ def embed_tickets(request):
 
     print('Initializing qdrant client')  
     
-    qd_client.create_collection(
-        collection_name=collection_name,
-        vectors_config={
-            "baai-large": models.VectorParams(
-                size = 1024,
-                distance = models.Distance.COSINE
-            )
-        },
-        sparse_vectors_config={
-            "bm25": models.SparseVectorParams(
-                modifier = models.Modifier.IDF
-            )
-        },
-    )
+    # qd_client.create_collection(
+    #     collection_name=collection_name,
+    #     vectors_config={
+    #         "baai-large": models.VectorParams(
+    #             size = 1024,
+    #             distance = models.Distance.COSINE
+    #         )
+    #     },
+    #     sparse_vectors_config={
+    #         "bm25": models.SparseVectorParams(
+    #             modifier = models.Modifier.IDF
+    #         )
+    #     },
+    # )
 
     print('Uploading data points...')
     qd_client.upsert(
@@ -885,113 +891,176 @@ def get_problem(full_text_conversation) -> str:
 # [Standardized problem statement with ALL products normalized as "items"]
 # """
 
+#     prompt_template = """
+# ```
+# ## CONTEXT
+# You are extracting customer problems from Tindahang Tapat support conversations. Tindahang Tapat is a digital platform enabling sari-sari stores to order groceries via mobile phone. Your output will be stored in a vector database for RAG-based support automation.
+
+# ## ANALYSIS OBJECTIVE
+# Extract the **primary functional problem** that prompted the customer to contact support, formatted for optimal knowledge base retrieval.
+
+# ## CUSTOMER PERSPECTIVE FOCUS
+# **CRITICAL**: Focus exclusively on the customer's perspective when analyzing the conversation. The conversation data may include messages from both customers and customer service agents. When generating the problem statement:
+# - **Extract only customer queries/concerns** - ignore agent responses and solutions
+# - **Identify what the customer is asking about** - not what the agent is explaining
+# - **Focus on the customer's original issue** - not the troubleshooting process
+# - **Capture the customer's experience of the problem** - not the technical resolution
+# - **STRICT RULE**: Only include information explicitly stated in customer messages - NO assumptions or inferences about impact or consequences
+
+# ## PROBLEM STATEMENT REQUIREMENTS
+# ### Structure (2-3 sentences maximum)
+# 1. **Issue identification**: What specific functionality failed or caused confusion
+# 2. **Context**: Under what circumstances the problem occurs
+# 3. **Impact**: How it affects the customer's workflow (ONLY if explicitly stated in conversation)
+
+# ### Quality Standards
+# - **Functional focus**: Describe system behavior, not customer emotions
+# - **Actionable language**: Use verbs that describe what went wrong
+# - **Consistent terminology**: Apply standardized platform vocabulary
+# - **Generic applicability**: Remove ALL unique identifiers while preserving problem essence
+# - **Search optimization**: Include keywords support agents would use to find solutions
+# - **NO ASSUMPTIONS**: Only include information explicitly stated in the customer's messages
+
+# ## MANDATORY STANDARDIZATION RULES
+# ### CRITICAL: Product Normalization
+# **ALWAYS replace ALL specific product names with "items"**
+# - "Nescafe 3-in-1 sachets" → "items"
+# - "Tide powder 1kg" → "items"
+# - "Lucky Me noodles" → "items"
+# - "Coca-Cola 1.5L" → "items"
+# - "Pantene shampoo" → "items"
+# - "Kopiko coffee" → "items"
+# - "Maggi seasoning" → "items"
+# - ANY brand name or specific product → "items"
+
+# ### Other Standardizations
+# **Customer References**
+# - Any customer name → "customer"
+# - Any specific store name → "customer's store"
+# - Any order number → "customer order"
+# - Any account details → "customer account"
+
+# **Location Preservation**
+# - **PRESERVE location keywords** such as city names, regions, areas, barangays, municipalities
+# - Keep location-related terms that provide context for delivery or service areas
+# - Example: "Quezon City," "Manila," "Cebu," "Davao," "Makati," etc. should be retained
+
+# **Technical Terms**
+# - "App crashed/froze/stopped" → "mobile application became unresponsive"
+# - "Payment failed/declined/error" → "payment processing failed"
+# - "Can't login/access" → "authentication failed"
+# - "Won't load/loading" → "content failed to load"
+
+# **Process References**
+# - "Ordering/checkout process" → "order placement process"
+# - "Delivery tracking" → "order status tracking"
+# - "Cart/basket" → "shopping cart"
+
+# ### Absolute Exclusions
+# **NEVER include:**
+# - Any brand names, product names, or specific item descriptions
+# - Customer names, specific store names
+# - Order numbers, account IDs, reference codes
+# - Agent names or responses
+# - Timestamps or dates
+# - Emotional language ("frustrated", "angry", "disappointed")
+# - Greetings or pleasantries
+# - Multiple explanations of the same issue
+# - **ASSUMPTIONS OR INFERENCES** about impact, consequences, or effects not explicitly stated by the customer
+# - Statements about what the customer "needs," "wants," or "expects" unless directly quoted
+# - Impact statements that are not explicitly mentioned in customer messages
+
+# **PRESERVE (do not exclude):**
+# - Geographic locations (cities, regions, areas, barangays, municipalities) when relevant to the problem
+
+# ## CONVERSATION DATA
+# ```
+# {conversation}
+# ```
+
+# ## CRITICAL INSTRUCTIONS
+# 1. Read the conversation carefully
+# 2. **Focus ONLY on customer messages** - ignore agent responses
+# 3. Identify the PRIMARY technical/functional problem from the customer's perspective
+# 4. Apply ALL standardization rules - especially product normalization
+# 5. Write EXACTLY 2-3 sentences describing the problem
+# 6. Double-check that NO specific product names remain
+# 7. Ensure the problem statement is generic and searchable
+# 8. **VERIFY**: Remove all assumptions, inferences, or impact statements not explicitly stated by the customer
+
+# ## OUTPUT REQUIREMENTS
+# - Start immediately with the problem (no introduction)
+# - Use only standardized terminology
+# - End with a period
+# - If no clear problem exists, output: "No identifiable problem."
+# - If multiple problems exist, focus on the most critical one
+
+# ## EXPECTED OUTPUT FORMAT
+# Provide ONLY the section below. No explanations, commentary, or additional text.
+# [Standardized problem statement with ALL products normalized as "items"]
+# """
+
     prompt_template = """
-```
-## CONTEXT
-You are extracting customer problems from Tindahang Tapat support conversations. Tindahang Tapat is a digital platform enabling sari-sari stores to order groceries via mobile phone. Your output will be stored in a vector database for RAG-based support automation.
+## OBJECTIVE
+Extract the primary functional problem from customer messages in Tindahang Tapat support conversations. Focus on what the customer explicitly describes as their issue or question.
 
-## ANALYSIS OBJECTIVE
-Extract the **primary functional problem** that prompted the customer to contact support, formatted for optimal knowledge base retrieval.
+## PROBLEM IDENTIFICATION GUIDE
+Look for customer statements indicating:
+- System functionality not working as expected
+- Difficulty completing a task or process
+- Questions about how something works
+- Issues accessing features or services
+- Error messages or unexpected behavior
+- Requests for help with specific functions
 
-## CUSTOMER PERSPECTIVE FOCUS
-**CRITICAL**: Focus exclusively on the customer's perspective when analyzing the conversation. The conversation data may include messages from both customers and customer service agents. When generating the problem statement:
-- **Extract only customer queries/concerns** - ignore agent responses and solutions
-- **Identify what the customer is asking about** - not what the agent is explaining
-- **Focus on the customer's original issue** - not the troubleshooting process
-- **Capture the customer's experience of the problem** - not the technical resolution
-- **STRICT RULE**: Only include information explicitly stated in customer messages - NO assumptions or inferences about impact or consequences
+## CUSTOMER FOCUS RULE
+- Read the entire conversation data carefully
+- Identify messages FROM the customer (vs. support agent responses)
+- Extract the core issue the customer is describing or asking about
+- Use only information the customer explicitly provides
 
-## PROBLEM STATEMENT REQUIREMENTS
-### Structure (2-3 sentences maximum)
-1. **Issue identification**: What specific functionality failed or caused confusion
-2. **Context**: Under what circumstances the problem occurs
-3. **Impact**: How it affects the customer's workflow (ONLY if explicitly stated in conversation)
+## OUTPUT FORMAT
+Write 2-3 sentences describing:
+1. What specific functionality failed, caused confusion, or the customer asked about
+2. Under what circumstances (if customer provided this context)
+3. Customer-stated impact only (if explicitly mentioned)
 
-### Quality Standards
-- **Functional focus**: Describe system behavior, not customer emotions
-- **Actionable language**: Use verbs that describe what went wrong
-- **Consistent terminology**: Apply standardized platform vocabulary
-- **Generic applicability**: Remove ALL unique identifiers while preserving problem essence
-- **Search optimization**: Include keywords support agents would use to find solutions
-- **NO ASSUMPTIONS**: Only include information explicitly stated in the customer's messages
-
-## MANDATORY STANDARDIZATION RULES
-### CRITICAL: Product Normalization
-**ALWAYS replace ALL specific product names with "items"**
-- "Nescafe 3-in-1 sachets" → "items"
-- "Tide powder 1kg" → "items"
+## MANDATORY STANDARDIZATIONS
+**Products**: Replace ALL product names → "items"
+- "Nescafe sachets" → "items"
+- "Tide powder" → "items" 
 - "Lucky Me noodles" → "items"
-- "Coca-Cola 1.5L" → "items"
-- "Pantene shampoo" → "items"
-- "Kopiko coffee" → "items"
-- "Maggi seasoning" → "items"
-- ANY brand name or specific product → "items"
 
-### Other Standardizations
-**Customer References**
-- Any customer name → "customer"
-- Any specific store name → "customer's store"
-- Any order number → "customer order"
-- Any account details → "customer account"
+**Personally Identifiable Information**:
+- Customer names → "customer"
+- Store names → "customer's store"  
+- Order numbers → "customer order"
 
-**Location Preservation**
-- **PRESERVE location keywords** such as city names, regions, areas, barangays, municipalities
-- Keep location-related terms that provide context for delivery or service areas
-- Example: "Quezon City," "Manila," "Cebu," "Davao," "Makati," etc. should be retained
+**Preserve**: Geographic locations (cities, regions, barangays)
+Preserve important keywords related to app functions, processes, and technical terms.
 
-**Technical Terms**
-- "App crashed/froze/stopped" → "mobile application became unresponsive"
-- "Payment failed/declined/error" → "payment processing failed"
-- "Can't login/access" → "authentication failed"
-- "Won't load/loading" → "content failed to load"
-
-**Process References**
-- "Ordering/checkout process" → "order placement process"
-- "Delivery tracking" → "order status tracking"
-- "Cart/basket" → "shopping cart"
-
-### Absolute Exclusions
-**NEVER include:**
-- Any brand names, product names, or specific item descriptions
-- Customer names, specific store names
-- Order numbers, account IDs, reference codes
-- Agent names or responses
-- Timestamps or dates
-- Emotional language ("frustrated", "angry", "disappointed")
-- Greetings or pleasantries
-- Multiple explanations of the same issue
-- **ASSUMPTIONS OR INFERENCES** about impact, consequences, or effects not explicitly stated by the customer
-- Statements about what the customer "needs," "wants," or "expects" unless directly quoted
-- Impact statements that are not explicitly mentioned in customer messages
-
-**PRESERVE (do not exclude):**
-- Geographic locations (cities, regions, areas, barangays, municipalities) when relevant to the problem
+## EXCLUSIONS
+Never include:
+- Brand/product names
+- Customer names, order IDs, reference codes
+- Agent responses or solutions
+- Emotional language ("frustrated", "angry")
+- Assumptions about impact not explicitly stated
 
 ## CONVERSATION DATA
 ```
 {conversation}
 ```
 
-## CRITICAL INSTRUCTIONS
-1. Read the conversation carefully
-2. **Focus ONLY on customer messages** - ignore agent responses
-3. Identify the PRIMARY technical/functional problem from the customer's perspective
-4. Apply ALL standardization rules - especially product normalization
-5. Write EXACTLY 2-3 sentences describing the problem
-6. Double-check that NO specific product names remain
-7. Ensure the problem statement is generic and searchable
-8. **VERIFY**: Remove all assumptions, inferences, or impact statements not explicitly stated by the customer
+## OUTPUT INSTRUCTIONS
+1. Read through the conversation carefully
+2. Identify what the customer is describing as their problem or question
+3. Apply standardizations to create a generic problem statement
+4. Write the problem statement directly (no introduction phrases)
 
-## OUTPUT REQUIREMENTS
-- Start immediately with the problem (no introduction)
-- Use only standardized terminology
-- End with a period
-- If no clear problem exists, output: "No identifiable problem."
-- If multiple problems exist, focus on the most critical one
+If truly no customer problem can be identified, output: "No identifiable problem."
 
-## EXPECTED OUTPUT FORMAT
-Provide ONLY the section below. No explanations, commentary, or additional text.
-[Standardized problem statement with ALL products normalized as "items"]
+[Problem statement here]
 """
 
     prompt = prompt_template.format(conversation=full_text_conversation)
